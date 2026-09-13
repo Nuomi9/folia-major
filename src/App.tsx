@@ -64,6 +64,7 @@ import { useAppNavigation } from './hooks/useAppNavigation';
 import { useNeteaseLibrary } from './hooks/useNeteaseLibrary';
 import { useKugouLibrary } from './hooks/useKugouLibrary';
 import { useQqLibrary } from './hooks/useQqLibrary';
+import { useBilibiliLibrary } from './hooks/useBilibiliLibrary';
 import { useOnlineProviderPlatform } from './hooks/useOnlineProviderPlatform';
 import { useAppPreferences } from './hooks/useAppPreferences';
 import { useElectronPlaybackBridge } from './hooks/useElectronPlaybackBridge';
@@ -739,16 +740,22 @@ export default function App() {
         refresh: refreshQqLibrary,
         logout: logoutQqLibrary,
     } = useQqLibrary();
+    const {
+        refresh: refreshBilibiliLibrary,
+        logout: logoutBilibiliLibrary,
+    } = useBilibiliLibrary();
     const onlineProviderRefreshers = useMemo(() => ({
         netease: refreshUserData,
         kugou: refreshKugouLibrary,
         qq: refreshQqLibrary,
-    }), [refreshKugouLibrary, refreshQqLibrary, refreshUserData]);
+        bilibili: refreshBilibiliLibrary,
+    }), [refreshBilibiliLibrary, refreshKugouLibrary, refreshQqLibrary, refreshUserData]);
     const onlineProviderLogouts = useMemo(() => ({
         netease: handleLogout,
         kugou: logoutKugouLibrary,
         qq: logoutQqLibrary,
-    }), [handleLogout, logoutKugouLibrary, logoutQqLibrary]);
+        bilibili: logoutBilibiliLibrary,
+    }), [handleLogout, logoutBilibiliLibrary, logoutKugouLibrary, logoutQqLibrary]);
 
     const prepareOnlineProviderSwitch = useCallback((_currentProviderId: OnlineProviderId, nextProviderId: OnlineProviderId): Promise<boolean> => {
         return new Promise<boolean>((resolve) => {
@@ -764,21 +771,11 @@ export default function App() {
         const { nextProviderId, resolve } = providerSwitchPending;
         setProviderSwitchPending(null);
 
-        // Stops any deck still fading out in the background: this path clears the active deck
-        // only, and a tail left running would have no control pointing at it any more.
+        // Keep the running deck and current song across provider switches: every queue item carries
+        // its own provider identity (sourceRef), so playback, lyrics and covers resolve per song and
+        // do not depend on the active provider. Only the crossfade tail and provider-scoped prefetch
+        // runtime are dropped, and search/navigation state resets for the incoming provider.
         automixRef.current?.abortTransition();
-        const audio = audioRef.current;
-        audio?.pause();
-        audio?.removeAttribute('src');
-        audio?.load();
-        if (audioSrc?.startsWith('blob:')) URL.revokeObjectURL(audioSrc);
-        setAudioSrc(null);
-        setCurrentSong(null);
-        setPlayQueue([]);
-        setLyrics(null);
-        setCachedCoverUrl(null);
-        setIsFmMode(false);
-        setPlayerState(PlayerState.IDLE);
         clearPrefetchRuntime();
         // The measurements are keyed by playback key, so the outgoing provider's are unreachable
         // from here on. Dropped alongside the prefetch cache they were gathered with, rather than

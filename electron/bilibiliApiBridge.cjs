@@ -1,0 +1,469 @@
+let QRCode = null;
+try { QRCode = require('qrcode'); } catch { /* optional peer: only qr_image needs it */ }
+
+// electron/bilibiliApiBridge.cjs
+// Bilibili credentials live in the main process only: cookies (SESSDATA / bili_jct / buvid…) are
+// persisted as a safeStorage-encrypted envelope and never handed to the renderer. The renderer
+// keeps only non-secret hints (mid, nickname, avatar) through providerStorage.
+
+const SESSION_KEY = 'BILIBILI_SESSION_V1';
+const ENVELOPE_VERSION = 1;
+
+const PASSPORT_BASE = 'https://passport.bilibili.com';
+const API_BASE = 'https://api.bilibili.com';
+
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const COMMON_HEADERS = {
+    'User-Agent': USER_AGENT,
+    Referer: 'https://www.bilibili.com/',
+    Origin: 'https://www.bilibili.com',
+};
+
+const QR_POLL_STATE = {
+    0: 'confirmed',
+    86038: 'expired',
+    86090: 'scanned',
+    86101: 'waiting',
+};
+
+const SESSION_COOKIE_KEYS = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid', 'buvid3', 'buvid4'];
+
+// --- WBI request signing (ported from Biu's electron/ipc/api/wbi.ts) ---
+const crypto = require('crypto');
+
+const MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41,
+    13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34,
+    44, 52,
+];
+
+const getMixinKey = (orig) => MIXIN_KEY_ENC_TAB.map(n => orig[n]).join('').slice(0, 32);
+
+const signWbiParams = (params, wbi) => {
+    if (!wbi?.imgKey || !wbi?.subKey) return params;
+    const mixinKey = getMixinKey(wbi.imgKey + wbi.subKey);
+    const chrFilter = /[!'()*]/g;
+    const signed = { ...params, wts: Math.round(Date.now() / 1000) };
+    const query = Object.keys(signed)
+        .sort()
+        .map((key) => {
+            const value = String(signed[key]).replace(chrFilter, '');
+            return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
+        })
+        .join('&');
+    const wRid = crypto.createHash('md5').update(query + mixinKey).digest('hex');
+    return { ...signed, w_rid: wRid };
+};
+
+function createBilibiliApiBridge({ store, safeStorage, warn }) {
+    const logWarn = (message, error) => {
+        const fn = warn || console.warn;
+        fn('[BilibiliBridge]', message, error instanceof Error ? error.message : error || '');
+    };
+
+    // safeStorage is only usable after the app 'ready' event; the bridge is constructed earlier,
+    // so availability is probed lazily on every persist/load instead of once at creation time.
+    const isEncryptionAvailable = () => {
+        if (!safeStorage || typeof safeStorage.isEncryptionAvailable !== 'function') return false;
+        try {
+            return Boolean(safeStorage.isEncryptionAvailable());
+        } catch {
+            return false;
+        }
+    };
+
+    let encryptionWarned = false;
+    const encryptionAvailable = () => {
+        const available = isEncryptionAvailable();
+        if (!available && !encryptionWarned) {
+            encryptionWarned = true;
+            logWarn('safeStorage unavailable; keeping the session in memory only (it will not survive restarts)');
+        }
+        return available;
+    };
+
+    // In-memory session; hydrated from the encrypted store on first access.
+    let session = null;
+    let sessionLoaded = false;
+
+    const loadSession = () => {
+        if (sessionLoaded) return session;
+        sessionLoaded = true;
+        try {
+            const envelope = store.get(SESSION_KEY);
+            if (envelope && envelope.version === ENVELOPE_VERSION && envelope.encrypted && encryptionAvailable()) {
+                const decrypted = safeStorage.decryptString(Buffer.from(envelope.data, 'base64'));
+                const parsed = JSON.parse(decrypted);
+                if (parsed && typeof parsed === 'object') {
+                    session = {
+                        cookies: parsed.cookies || {},
+                        refreshToken: parsed.refreshToken || '',
+                        wbi: parsed.wbi || null,
+                        mid: parsed.mid || null,
+                        nickname: parsed.nickname || '',
+                    };
+                }
+            }
+        } catch (error) {
+            logWarn('failed to load stored session', error);
+        }
+        return session;
+    };
+
+    const persistSession = () => {
+        if (!session) return;
+        if (!encryptionAvailable()) return; // degraded: memory-only
+        try {
+            const payload = JSON.stringify({
+                cookies: session.cookies,
+                refreshToken: session.refreshToken,
+                wbi: session.wbi,
+                mid: session.mid,
+                nickname: session.nickname,
+            });
+            const encrypted = safeStorage.encryptString(payload);
+            store.set(SESSION_KEY, {
+                version: ENVELOPE_VERSION,
+                encrypted: true,
+                data: encrypted.toString('base64'),
+            });
+        } catch (error) {
+            logWarn('failed to persist session', error);
+        }
+    };
+
+    const setCookie = (name, value) => {
+        if (!session) session = { cookies: {}, refreshToken: '', wbi: null, mid: null, nickname: '' };
+        if (!name || !value) return;
+        session.cookies[name] = value;
+    };
+
+    const absorbSetCookies = (headers) => {
+        let absorbed = 0;
+        const entries = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : [];
+        entries.forEach((entry) => {
+            const pair = entry.split(';')[0] || '';
+            const separator = pair.indexOf('=');
+            if (separator <= 0) return;
+            const name = pair.slice(0, separator).trim();
+            const value = pair.slice(separator + 1).trim();
+            if (!name) return;
+            // Deletion cookies arrive as `name=; Expires=…` — treat an empty value as a removal.
+            if (!value) delete session?.cookies?.[name];
+            else setCookie(name, value);
+            absorbed += 1;
+        });
+        return absorbed;
+    };
+
+    const cookieHeader = () => {
+        if (!session) return '';
+        return Object.entries(session.cookies)
+            .map(([name, value]) => `${name}=${value}`)
+            .join('; ');
+    };
+
+    const requestJson = async (url, options = {}) => {
+        const response = await fetch(url, {
+            method: options.method || 'GET',
+            headers: {
+                ...COMMON_HEADERS,
+                ...(options.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
+                ...(cookieHeader() ? { Cookie: cookieHeader() } : {}),
+            },
+            body: options.body,
+        });
+        const setCookies = absorbSetCookies(response.headers);
+        const contentType = String(response.headers.get('content-type') || '');
+        if (!contentType.includes('json')) {
+            throw new Error(`Bilibili API returned non-JSON response (${response.status})`);
+        }
+        const body = await response.json();
+        return { body, setCookies, status: response.status };
+    };
+
+    const extractQrKeyFromUrl = (url) => {
+        try {
+            const parsed = new URL(url);
+            return parsed.searchParams.get('qrcode_key') || '';
+        } catch {
+            return '';
+        }
+    };
+
+    // Bilibili returns the login URL together with its key in a single call, while Folia's QR
+    // contract is key-first (getQrKey → createQr(key)). Remember the URL per key so createQr can
+    // render the image without a second round-trip. Keys expire in ~3 minutes, so the cache stays small.
+    const qrUrlByKey = new Map();
+
+    const operations = {
+        qr_generate: async () => {
+            const { body } = await requestJson(`${PASSPORT_BASE}/x/passport-login/web/qrcode/generate`);
+            if (body?.code !== 0 || !body?.data?.url || !body?.data?.qrcode_key) {
+                throw new Error(`qrcode generate failed: ${body?.code} ${body?.message || ''}`);
+            }
+            qrUrlByKey.set(String(body.data.qrcode_key), String(body.data.url));
+            return body.data;
+        },
+
+        qr_image: async ({ key }) => {
+            if (!key) throw new Error('qr_image: missing key');
+            const url = qrUrlByKey.get(String(key));
+            if (!url) throw new Error('qr_image: unknown key (generate first)');
+            if (!QRCode) throw new Error("the 'qrcode' package is not installed in the main process");
+            const imageUrl = await QRCode.toDataURL(url, { margin: 1, width: 320, errorCorrectionLevel: 'L' });
+            return { imageUrl };
+        },
+
+        qr_poll: async ({ key }) => {
+            if (!key) throw new Error('qr_poll: missing key');
+            const { body } = await requestJson(`${PASSPORT_BASE}/x/passport-login/web/qrcode/poll?qrcode_key=${encodeURIComponent(key)}`);
+            const data = body?.data || {};
+            const state = QR_POLL_STATE[Number(data.code)] || 'error';
+            if (state === 'confirmed') {
+                if (data.refresh_token) {
+                    if (!session) session = { cookies: {}, refreshToken: '', wbi: null, mid: null, nickname: '' };
+                    session.refreshToken = String(data.refresh_token);
+                }
+                persistSession();
+            }
+            return { state, message: data.message || '', url: data.url || '' };
+        },
+
+        // Device fingerprint cookies; needed before playurl/nav requests look "normal".
+        finger: async () => {
+            const { body } = await requestJson(`${API_BASE}/x/frontend/finger/spi`);
+            if (body?.code !== 0) throw new Error(`finger spi failed: ${body?.code}`);
+            if (body?.data?.b_3) setCookie('buvid3', body.data.b_3);
+            if (body?.data?.b_4) setCookie('buvid4', body.data.b_4);
+            persistSession();
+            return { b3: body?.data?.b_3 || '', b4: body?.data?.b_4 || '' };
+        },
+
+        login_status: async () => {
+            const { body } = await requestJson(`${API_BASE}/x/web-interface/nav`);
+            const data = body?.data || {};
+            if (body?.code === -101 || !data.isLogin) {
+                return { authenticated: false };
+            }
+            const wbiUrl = (url) => {
+                const text = String(url || '');
+                if (!text) return '';
+                const start = text.lastIndexOf('/') + 1;
+                const end = text.lastIndexOf('.');
+                return end > start ? text.slice(start, end) : '';
+            };
+            if (!session) session = { cookies: {}, refreshToken: '', wbi: null, mid: null, nickname: '' };
+            session.mid = Number(data.mid) || session.mid;
+            session.nickname = String(data.uname || session.nickname || '');
+            session.vipStatus = Number(data.vipStatus) || 0;
+            session.wbi = {
+                imgKey: wbiUrl(data.wbi_img?.img_url),
+                subKey: wbiUrl(data.wbi_img?.sub_url),
+            };
+            persistSession();
+            return {
+                authenticated: true,
+                user: {
+                    id: data.mid,
+                    nickname: data.uname || '',
+                    avatarUrl: data.face || '',
+                    vipType: Number(data.vipType) || 0,
+                },
+            };
+        },
+
+        logout: async () => {
+            const csrf = session?.cookies?.bili_jct || '';
+            if (csrf) {
+                try {
+                    const form = new URLSearchParams({ biliCSRF: csrf });
+                    await requestJson(`${PASSPORT_BASE}/x/passport-login/web/exit`, { method: 'POST', body: form });
+                } catch (error) {
+                    logWarn('server-side logout failed; clearing local session anyway', error);
+                }
+            }
+            session = null;
+            store.delete(SESSION_KEY);
+            return { ok: true };
+        },
+
+        // Favorite folders. `mid` falls back to the stored account id; a missing mid means the
+        // caller skipped login_status, which is a provider-side bug rather than a user error.
+        fav_created: async ({ mid }) => {
+            const targetMid = Number(mid || session?.mid || 0);
+            if (!targetMid) throw new Error('fav_created: no account mid (login first)');
+            const { body } = await requestJson(`${API_BASE}/x/v3/fav/folder/created/list-all?up_mid=${targetMid}&type=2`);
+            if (body?.code !== 0) throw new Error(`fav created failed: ${body?.code} ${body?.message || ''}`);
+            return body.data;
+        },
+
+        fav_collected: async ({ mid, pn = 1, ps = 20 }) => {
+            const targetMid = Number(mid || session?.mid || 0);
+            if (!targetMid) throw new Error('fav_collected: no account mid (login first)');
+            const { body } = await requestJson(
+                `${API_BASE}/x/v3/fav/folder/collected/list?up_mid=${targetMid}&pn=${Number(pn) || 1}&ps=${Number(ps) || 20}&platform=web`,
+            );
+            if (body?.code !== 0) throw new Error(`fav collected failed: ${body?.code} ${body?.message || ''}`);
+            return body.data;
+        },
+
+        fav_resources: async ({ mediaId, pn = 1, ps = 20 }) => {
+            const targetMediaId = String(mediaId || '').trim();
+            if (!targetMediaId) throw new Error('fav_resources: missing mediaId');
+            const { body } = await requestJson(
+                `${API_BASE}/x/v3/fav/resource/list?media_id=${encodeURIComponent(targetMediaId)}&pn=${Number(pn) || 1}&ps=${Number(ps) || 20}&order=mtime&type=0&platform=web`,
+            );
+            if (body?.code !== 0) throw new Error(`fav resources failed: ${body?.code} ${body?.message || ''}`);
+            return body.data;
+        },
+
+        // --- Playback ---
+
+        audio_song_info: async ({ songid }) => {
+            const targetSongId = String(songid || '').trim();
+            if (!targetSongId) throw new Error('audio_song_info: missing songid');
+            const { body } = await requestJson(
+                `${API_BASE}/audio/music-service-c/web/song/info?sid=${encodeURIComponent(targetSongId)}`,
+            );
+            if (body?.code !== 0) throw new Error(`audio song info failed: ${body?.code}`);
+            return body.data;
+        },
+
+        // Audio-region stream. quality: 0=128K 1=192K 2=320K 3=FLAC; type -1 in the reply marks a
+        // paid preview clip, which callers use as the fallback trigger for the next-lower tier.
+        audio_url: async ({ songid }) => {
+            const targetSongId = String(songid || '').trim();
+            if (!targetSongId) throw new Error('audio_url: missing songid');
+            const targetMid = session?.mid || '';
+            const vipStatus = session?.vipStatus ? 1 : 0;
+            const fetchUrl = async (quality) => {
+                const { body } = await requestJson(
+                    `${API_BASE}/audio/music-service-c/url?mid=${targetMid}&songid=${encodeURIComponent(targetSongId)}&quality=${quality}&privilege=2&platform=web`,
+                );
+                return body;
+            };
+            let body = await fetchUrl(vipStatus ? 3 : 2);
+            if (Number(body?.data?.type) === -1) {
+                body = await fetchUrl(2);
+            }
+            if (body?.code !== 0 || !body?.data?.cdns?.length) {
+                logWarn(`audio url failed: code=${body?.code} msg=${body?.msg || body?.message || ''} songid=${targetSongId}`);
+                throw new Error(`audio url failed: ${body?.code} ${body?.msg || body?.message || ''}`);
+            }
+            return {
+                url: String(body.data.cdns[0]),
+                backupUrl: body.data.cdns[1] ? String(body.data.cdns[1]) : '',
+                qualityType: Number(body.data.type),
+                timeoutSec: Number(body.data.timeout) || 0,
+                title: body.data.title || '',
+            };
+        },
+
+        video_view: async ({ bvid, avid }) => {
+            const query = bvid
+                ? `bvid=${encodeURIComponent(String(bvid))}`
+                : `aid=${Number(avid) || 0}`;
+            const { body } = await requestJson(`${API_BASE}/x/web-interface/view?${query}`);
+            if (body?.code !== 0) throw new Error(`view failed: ${body?.code} ${body?.message || ''}`);
+            const data = body.data || {};
+            const firstPage = Array.isArray(data.pages) && data.pages.length > 0 ? data.pages[0] : null;
+            return {
+                bvid: data.bvid || String(bvid || ''),
+                avid: data.aid || Number(avid) || 0,
+                cid: firstPage?.cid ?? data.cid ?? 0,
+                title: data.title || '',
+                pic: data.pic || '',
+                pages: Array.isArray(data.pages)
+                    ? data.pages.map(page => ({ cid: page.cid, part: page.part, duration: page.duration }))
+                    : [],
+            };
+        },
+
+        video_playurl: async ({ avid, bvid, cid }) => {
+            const targetCid = Number(cid) || 0;
+            if (!targetCid) throw new Error('video_playurl: missing cid');
+            const params = signWbiParams({
+                ...(bvid ? { bvid: String(bvid) } : { avid: Number(avid) || 0 }),
+                cid: targetCid,
+                qn: 64,
+                fnval: 16,
+                fnver: 0,
+                fourk: 1,
+            }, session?.wbi);
+            const query = new URLSearchParams();
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined) query.set(key, String(value));
+            });
+            const { body } = await requestJson(`${API_BASE}/x/player/wbi/playurl?${query}`);
+            if (body?.code !== 0) throw new Error(`playurl failed: ${body?.code} ${body?.message || ''}`);
+            const dash = body?.data?.dash;
+            const audioList = Array.isArray(dash?.audio) ? dash.audio : [];
+            const best = audioList
+                .filter(stream => stream?.base_url)
+                .sort((left, right) => Number(right.bandwidth || 0) - Number(left.bandwidth || 0))[0];
+            if (best) {
+                return {
+                    url: String(best.base_url),
+                    backupUrl: Array.isArray(best.backup_url) && best.backup_url.length ? String(best.backup_url[0]) : '',
+                    bandwidth: Number(best.bandwidth) || 0,
+                    codecs: best.codecs || '',
+                    timelengthMs: Number(body?.data?.timelength) || 0,
+                };
+            }
+            // Legacy videos answer with a muxed durl (MP4) instead of DASH. An <audio> element can
+            // still play its audio track, so hand the proxy the direct URL.
+            const durl = Array.isArray(body?.data?.durl) ? body.data.durl[0] : null;
+            if (durl?.url) {
+                return {
+                    url: String(durl.url),
+                    backupUrl: Array.isArray(durl.backup_url) && durl.backup_url.length ? String(durl.backup_url[0]) : '',
+                    bandwidth: 0,
+                    codecs: 'muxed-durl',
+                    timelengthMs: Number(body?.data?.timelength) || 0,
+                };
+            }
+            logWarn(
+                'playurl: no audio stream; '
+                + `v_voucher=${body?.data?.v_voucher ? 'present(risk-control)' : 'absent'} `
+                + `hasDash=${Boolean(dash)} durlCount=${Array.isArray(body?.data?.durl) ? body.data.durl.length : 0} `
+                + `acceptQuality=${JSON.stringify(body?.data?.accept_quality || []).slice(0, 100)}`,
+            );
+            throw new Error('playurl: no audio stream in dash or durl response');
+        },
+    };
+
+    const hasAuthenticatedCookies = () => {
+        const cookies = session?.cookies || {};
+        return SESSION_COOKIE_KEYS.filter((key) => cookies[key]).length >= 3;
+    };
+
+    const pruneNonSessionCookies = () => {
+        if (!session) return;
+        const next = {};
+        SESSION_COOKIE_KEYS.forEach((key) => {
+            if (session.cookies[key]) next[key] = session.cookies[key];
+        });
+        session.cookies = next;
+    };
+
+    return {
+        getStatus() {
+            const current = session || loadSession();
+            if (!current) return { configured: true, authenticated: false };
+            return { configured: true, authenticated: hasAuthenticatedCookies() };
+        },
+
+        async request(operation, params = {}) {
+            if (!session) loadSession();
+            const handler = operations[operation];
+            if (!handler) throw new Error(`Unknown bilibili operation: ${operation}`);
+            const result = await handler(params);
+            // Keep the stored envelope focused on long-lived credentials; transient cookies are dropped.
+            if (session) pruneNonSessionCookies();
+            return result;
+        },
+    };
+}
+
+module.exports = { createBilibiliApiBridge };

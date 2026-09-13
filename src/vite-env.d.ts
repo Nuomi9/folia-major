@@ -64,6 +64,26 @@ declare global {
     error: string | null;
   }
 
+  type ElectronBilibiliOperation =
+    | 'qr_generate'
+    | 'qr_image'
+    | 'qr_poll'
+    | 'finger'
+    | 'login_status'
+    | 'logout'
+    | 'fav_created'
+    | 'fav_collected'
+    | 'fav_resources'
+    | 'audio_song_info'
+    | 'audio_url'
+    | 'video_view'
+    | 'video_playurl';
+
+  interface ElectronBilibiliApiStatus {
+    configured: boolean;
+    authenticated: boolean;
+  }
+
   interface ElectronTaskbarControlState {
     hasActiveTrack: boolean;
     canGoPrevious: boolean;
@@ -716,6 +736,11 @@ declare global {
       getKugouApiStatus: () => Promise<ElectronKugouApiStatus>;
       kugouRequest: (
         operation: ElectronKugouOperation,
+        params?: Record<string, string | number | boolean | undefined>,
+      ) => Promise<unknown>;
+      getBilibiliApiStatus: () => Promise<ElectronBilibiliApiStatus>;
+      bilibiliRequest: (
+        operation: ElectronBilibiliOperation,
         params?: Record<string, string | number | boolean | undefined>,
       ) => Promise<unknown>;
       getQqPort: () => Promise<number | null>;

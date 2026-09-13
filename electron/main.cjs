@@ -13,6 +13,8 @@ const wallpaperWatchdogModule = require('./wallpaperWatchdog.cjs');
 const windowsWallpaperModule = require('./windowsWallpaperController.cjs');
 const macWallpaperModule = require('./macWallpaperController.cjs');
 const { createKugouApiBridge } = require('./kugouApiBridge.cjs');
+const { createBilibiliApiBridge } = require('./bilibiliApiBridge.cjs');
+const { createBilibiliMediaProxy } = require('./bilibiliMediaProxy.cjs');
 const { createQqAuthSessionRepository } = require('./qqAuthSessionRepository.cjs');
 const { DEFAULT_DISCORD_APPLICATION_ID, createDiscordPresenceController } = require('./discordPresence.cjs');
 const { createVoiceInputPauseMonitor } = require('./voiceInputPause.cjs');
@@ -81,6 +83,16 @@ protocol.registerSchemesAsPrivileged([
   },
   {
     scheme: TRANSCODE_PROTOCOL_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+  {
+    scheme: 'folia-bili',
     privileges: {
       standard: true,
       secure: true,
@@ -185,6 +197,8 @@ const transcodeService = createTranscodeService({
 // KuGou credentials stay inside the main process and are encrypted lazily after Electron is ready.
 // The bridge refuses Linux's plaintext `basic_text` fallback and degrades to an in-memory session.
 const kugouApiBridge = createKugouApiBridge({ store, safeStorage });
+const bilibiliApiBridge = createBilibiliApiBridge({ store, safeStorage });
+const bilibiliMediaProxy = createBilibiliMediaProxy({});
 const qqAuthSessionRepository = createQqAuthSessionRepository({ store, safeStorage });
 
 // --- Desktop wallpaper mode (Wayland layer-shell via windowtolayer / X11 desktop window) ---
@@ -5221,6 +5235,7 @@ app.whenReady().then(async () => {
   setupFileSystemAccessPermissionHandlers();
   setupCorsBypassHandlers();
   localCoverAssetStore.registerProtocolHandler(protocol, electronNet);
+  bilibiliMediaProxy.registerProtocolHandler(protocol, electronNet);
   // Transcode fallback is an optional degradation path; a failure preparing it must never keep
   // the rest of this handler, createWindow() included, from running.
   try {
@@ -5974,6 +5989,8 @@ ipcMain.handle('get-qq-api-status', () => qqApiStatus);
 
 ipcMain.handle('kugou-api-status', () => kugouApiBridge.getStatus());
 ipcMain.handle('kugou-api-request', (_event, operation, params) => kugouApiBridge.request(operation, params));
+ipcMain.handle('bilibili-api-status', () => bilibiliApiBridge.getStatus());
+ipcMain.handle('bilibili-api-request', (_event, operation, params) => bilibiliApiBridge.request(operation, params));
 
 ipcMain.handle('window-minimize', () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
