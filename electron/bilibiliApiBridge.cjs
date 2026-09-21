@@ -55,7 +55,27 @@ const signWbiParams = (params, wbi) => {
     return { ...signed, w_rid: wRid };
 };
 
-function createBilibiliApiBridge({ store, safeStorage, warn }) {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Bilibili's WAF answers abusive bursts with HTTP 412 (and `code: -412` inside a 200 body). Once
+// tripped it keeps rejecting the whole IP + session for a while, so the bridge stops sending for a
+// cooldown window instead of retrying straight back into a longer ban.
+const RISK_CONTROL_COOLDOWN_MS = 10 * 60 * 1000;
+// Serialized, paced requests: Bilibili rate-limits fav/playurl aggressively and treats parallel
+// bursts as scraping, so keep one request in flight with a small gap between them.
+const MIN_REQUEST_GAP_MS = 300;
+const REQUEST_TIMEOUT_MS = 15_000;
+const REQUEST_MAX_ATTEMPTS = 2;
+
+class BilibiliRiskControlError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'BilibiliRiskControlError';
+        this.isRiskControl = true;
+    }
+}
+
+function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
     const logWarn = (message, error) => {
         const fn = warn || console.warn;
         fn('[BilibiliBridge]', message, error instanceof Error ? error.message : error || '');
@@ -138,9 +158,18 @@ function createBilibiliApiBridge({ store, safeStorage, warn }) {
         session.cookies[name] = value;
     };
 
+    const collectSetCookieHeaders = (headers) => {
+        if (typeof headers.getSetCookie === 'function') return headers.getSetCookie();
+        const raw = headers.get('set-cookie');
+        if (!raw) return [];
+        // Fallback for stacks without getSetCookie(): split on the comma that precedes the next
+        // `name=` pair, leaving `Expires=Wed, 21 Oct …` commas intact.
+        return raw.split(/,(?=\s*[A-Za-z0-9_.-]+=)/);
+    };
+
     const absorbSetCookies = (headers) => {
         let absorbed = 0;
-        const entries = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : [];
+        const entries = collectSetCookieHeaders(headers);
         entries.forEach((entry) => {
             const pair = entry.split(';')[0] || '';
             const separator = pair.indexOf('=');
@@ -163,23 +192,92 @@ function createBilibiliApiBridge({ store, safeStorage, warn }) {
             .join('; ');
     };
 
-    const requestJson = async (url, options = {}) => {
-        const response = await fetch(url, {
-            method: options.method || 'GET',
-            headers: {
-                ...COMMON_HEADERS,
-                ...(options.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
-                ...(cookieHeader() ? { Cookie: cookieHeader() } : {}),
-            },
-            body: options.body,
-        });
-        const setCookies = absorbSetCookies(response.headers);
-        const contentType = String(response.headers.get('content-type') || '');
-        if (!contentType.includes('json')) {
-            throw new Error(`Bilibili API returned non-JSON response (${response.status})`);
+    // Prefer Chromium's network stack (Electron `net.fetch`): the Bilibili WAF fingerprints the
+    // TLS/HTTP2 client and lets browser-like clients through where Node's undici gets challenged.
+    const doFetch = typeof netFetch === 'function' ? netFetch : fetch;
+
+    let riskControlUntil = 0;
+    let requestChain = Promise.resolve();
+    let lastRequestAt = 0;
+
+    const assertNotCoolingDown = () => {
+        const remaining = riskControlUntil - Date.now();
+        if (remaining > 0) {
+            throw new BilibiliRiskControlError(
+                `Bilibili 风控冷却中，请约 ${Math.ceil(remaining / 60000)} 分钟后重试（或切换网络/IP）`,
+            );
         }
-        const body = await response.json();
-        return { body, setCookies, status: response.status };
+    };
+
+    const tripRiskControl = (detail) => {
+        riskControlUntil = Date.now() + RISK_CONTROL_COOLDOWN_MS;
+        logWarn(
+            `risk control triggered (412)${detail ? `: ${detail}` : ''}; `
+            + `pausing requests for ${RISK_CONTROL_COOLDOWN_MS / 60000} min`,
+        );
+        return new BilibiliRiskControlError(
+            'Bilibili 风控拦截（412）：请求过于频繁或当前网络/IP 被限制，已暂停请求，请稍后再试',
+        );
+    };
+
+    const requestJsonOnce = async (url, options = {}) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), options.timeoutMs || REQUEST_TIMEOUT_MS);
+        try {
+            const response = await doFetch(url, {
+                method: options.method || 'GET',
+                headers: {
+                    ...COMMON_HEADERS,
+                    ...(options.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
+                    ...(cookieHeader() ? { Cookie: cookieHeader() } : {}),
+                },
+                body: options.body,
+                signal: controller.signal,
+            });
+            const setCookies = absorbSetCookies(response.headers);
+            if (response.status === 412) {
+                throw tripRiskControl(`HTTP 412 for ${url}`);
+            }
+            const contentType = String(response.headers.get('content-type') || '');
+            if (!contentType.includes('json')) {
+                throw new Error(`Bilibili API returned non-JSON response (${response.status})`);
+            }
+            const body = await response.json();
+            // Bilibili also reports risk control inside a 200 body.
+            if (body && Number(body.code) === -412) {
+                throw tripRiskControl(`code -412 for ${url}`);
+            }
+            return { body, setCookies, status: response.status };
+        } finally {
+            clearTimeout(timer);
+        }
+    };
+
+    // Serialize + pace every API call. `finger` and passport traffic go through here too, so the
+    // device-fingerprint bootstrap can never race the request that triggered it.
+    const requestJson = (url, options = {}) => {
+        const run = async () => {
+            assertNotCoolingDown();
+            const gap = lastRequestAt + MIN_REQUEST_GAP_MS - Date.now();
+            if (gap > 0) await sleep(gap);
+            lastRequestAt = Date.now();
+            let lastError;
+            for (let attempt = 1; attempt <= REQUEST_MAX_ATTEMPTS; attempt += 1) {
+                try {
+                    return await requestJsonOnce(url, options);
+                } catch (error) {
+                    if (error?.isRiskControl) throw error; // never retry into a ban
+                    lastError = error;
+                    if (attempt < REQUEST_MAX_ATTEMPTS) {
+                        await sleep(400 * attempt + Math.floor(Math.random() * 200));
+                    }
+                }
+            }
+            throw lastError;
+        };
+        const result = requestChain.then(run, run);
+        requestChain = result.then(() => undefined, () => undefined);
+        return result;
     };
 
     const extractQrKeyFromUrl = (url) => {
@@ -195,6 +293,29 @@ function createBilibiliApiBridge({ store, safeStorage, warn }) {
     // contract is key-first (getQrKey → createQr(key)). Remember the URL per key so createQr can
     // render the image without a second round-trip. Keys expire in ~3 minutes, so the cache stays small.
     const qrUrlByKey = new Map();
+
+    // Device fingerprint cookies; Bilibili's risk control expects them on every API call.
+    const runFinger = async () => {
+        const { body } = await requestJson(`${API_BASE}/x/frontend/finger/spi`);
+        if (body?.code !== 0) throw new Error(`finger spi failed: ${body?.code}`);
+        if (body?.data?.b_3) setCookie('buvid3', body.data.b_3);
+        if (body?.data?.b_4) setCookie('buvid4', body.data.b_4);
+        persistSession();
+        return { b3: body?.data?.b_3 || '', b4: body?.data?.b_4 || '' };
+    };
+
+    // Passport endpoints are the exception: they mint the session, so they run before buvid exists.
+    const PASSPORT_OPERATIONS = new Set(['qr_generate', 'qr_image', 'qr_poll', 'logout']);
+    let fingerprintBootstrap = null;
+    const ensureDeviceFingerprint = async () => {
+        if (session?.cookies?.buvid3) return;
+        if (!fingerprintBootstrap) {
+            fingerprintBootstrap = runFinger()
+                .catch((error) => { logWarn('device fingerprint bootstrap failed', error); })
+                .finally(() => { fingerprintBootstrap = null; });
+        }
+        return fingerprintBootstrap;
+    };
 
     const operations = {
         qr_generate: async () => {
@@ -230,15 +351,7 @@ function createBilibiliApiBridge({ store, safeStorage, warn }) {
             return { state, message: data.message || '', url: data.url || '' };
         },
 
-        // Device fingerprint cookies; needed before playurl/nav requests look "normal".
-        finger: async () => {
-            const { body } = await requestJson(`${API_BASE}/x/frontend/finger/spi`);
-            if (body?.code !== 0) throw new Error(`finger spi failed: ${body?.code}`);
-            if (body?.data?.b_3) setCookie('buvid3', body.data.b_3);
-            if (body?.data?.b_4) setCookie('buvid4', body.data.b_4);
-            persistSession();
-            return { b3: body?.data?.b_3 || '', b4: body?.data?.b_4 || '' };
-        },
+        finger: () => runFinger(),
 
         login_status: async () => {
             const { body } = await requestJson(`${API_BASE}/x/web-interface/nav`);
@@ -458,6 +571,10 @@ function createBilibiliApiBridge({ store, safeStorage, warn }) {
             if (!session) loadSession();
             const handler = operations[operation];
             if (!handler) throw new Error(`Unknown bilibili operation: ${operation}`);
+            // Bootstrap buvid3/buvid4 before the first API call so it does not look like a bot.
+            if (operation !== 'finger' && !PASSPORT_OPERATIONS.has(operation)) {
+                await ensureDeviceFingerprint();
+            }
             const result = await handler(params);
             // Keep the stored envelope focused on long-lived credentials; transient cookies are dropped.
             if (session) pruneNonSessionCookies();

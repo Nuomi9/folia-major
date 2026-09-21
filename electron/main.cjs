@@ -197,7 +197,13 @@ const transcodeService = createTranscodeService({
 // KuGou credentials stay inside the main process and are encrypted lazily after Electron is ready.
 // The bridge refuses Linux's plaintext `basic_text` fallback and degrades to an in-memory session.
 const kugouApiBridge = createKugouApiBridge({ store, safeStorage });
-const bilibiliApiBridge = createBilibiliApiBridge({ store, safeStorage });
+const bilibiliApiBridge = createBilibiliApiBridge({
+  store,
+  safeStorage,
+  // Use Chromium's network stack so API traffic carries a browser-like TLS/HTTP2 fingerprint;
+  // the Bilibili WAF challenges Node's undici client far more often.
+  netFetch: (url, init) => electronNet.fetch(url, init),
+});
 const bilibiliMediaProxy = createBilibiliMediaProxy({});
 const qqAuthSessionRepository = createQqAuthSessionRepository({ store, safeStorage });
 
