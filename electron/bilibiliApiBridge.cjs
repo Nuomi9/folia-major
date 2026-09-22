@@ -7,6 +7,9 @@ try { QRCode = require('qrcode'); } catch { /* optional peer: only qr_image need
 // keeps only non-secret hints (mid, nickname, avatar) through providerStorage.
 
 const SESSION_KEY = 'BILIBILI_SESSION_V1';
+// Kept separate from the session envelope: the cooldown outlives logout and must survive a restart
+// even when safeStorage is unavailable, and it holds no credential.
+const RISK_CONTROL_KEY = 'BILIBILI_RISK_CONTROL_V1';
 const ENVELOPE_VERSION = 1;
 
 const PASSPORT_BASE = 'https://passport.bilibili.com';
@@ -57,10 +60,14 @@ const signWbiParams = (params, wbi) => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Bilibili's WAF answers abusive bursts with HTTP 412 (and `code: -412` inside a 200 body). Once
-// tripped it keeps rejecting the whole IP + session for a while, so the bridge stops sending for a
-// cooldown window instead of retrying straight back into a longer ban.
+// Bilibili's WAF answers abusive bursts with HTTP 412 (and `code: -412` inside a 200 body), and
+// rate-limits with 429/503. Once tripped it keeps rejecting the whole IP + session for a while, so
+// the bridge stops sending for a cooldown window instead of retrying straight back into a longer ban.
 const RISK_CONTROL_COOLDOWN_MS = 10 * 60 * 1000;
+const RISK_CONTROL_HTTP_STATUSES = new Set([412, 429, 503]);
+// A blocked finger/spi endpoint must not be re-probed ahead of every business request, or the
+// bootstrap doubles our request volume precisely while Bilibili is throttling us.
+const FINGERPRINT_RETRY_BACKOFF_MS = 60 * 1000;
 // Serialized, paced requests: Bilibili rate-limits fav/playurl aggressively and treats parallel
 // bursts as scraping, so keep one request in flight with a small gap between them.
 const MIN_REQUEST_GAP_MS = 300;
@@ -196,28 +203,73 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
     // TLS/HTTP2 client and lets browser-like clients through where Node's undici gets challenged.
     const doFetch = typeof netFetch === 'function' ? netFetch : fetch;
 
-    let riskControlUntil = 0;
+    // 冷却截止时间落盘：看到"冷却中"的用户第一反应就是重启应用，进程内计时器会让那次重启
+    // 直接撞回还没过期的封禁上，把封禁越拖越长。
+    const clearPersistedCooldown = () => {
+        try {
+            store.delete(RISK_CONTROL_KEY);
+        } catch (error) {
+            logWarn('failed to clear stored risk-control state', error);
+        }
+    };
+
+    const readPersistedCooldown = () => {
+        try {
+            const stored = store.get(RISK_CONTROL_KEY);
+            const until = Number(stored?.until);
+            if (!Number.isFinite(until)) return 0;
+            if (until > Date.now()) return until;
+            // 过期就顺手删掉：留着它只会在每次启动时重新解析一遍。
+            clearPersistedCooldown();
+            return 0;
+        } catch (error) {
+            logWarn('failed to load stored risk-control state', error);
+            return 0;
+        }
+    };
+
+    let riskControlUntil = -1; // -1 = 还没从 store 读过；桥在 app ready 前就构造好了，别在模块求值期读写 store
     let requestChain = Promise.resolve();
     let lastRequestAt = 0;
 
     const assertNotCoolingDown = () => {
+        if (riskControlUntil < 0) riskControlUntil = readPersistedCooldown();
         const remaining = riskControlUntil - Date.now();
-        if (remaining > 0) {
-            throw new BilibiliRiskControlError(
-                `Bilibili 风控冷却中，请约 ${Math.ceil(remaining / 60000)} 分钟后重试（或切换网络/IP）`,
-            );
+        if (remaining <= 0) {
+            if (riskControlUntil > 0) {
+                riskControlUntil = 0;
+                clearPersistedCooldown();
+            }
+            return;
         }
+        throw new BilibiliRiskControlError(
+            `Bilibili 风控冷却中，请约 ${Math.ceil(remaining / 60000)} 分钟后重试（或切换网络/IP）`,
+        );
     };
 
     const tripRiskControl = (detail) => {
         riskControlUntil = Date.now() + RISK_CONTROL_COOLDOWN_MS;
+        try {
+            store.set(RISK_CONTROL_KEY, { until: riskControlUntil });
+        } catch (error) {
+            logWarn('failed to persist risk-control state', error);
+        }
         logWarn(
-            `risk control triggered (412)${detail ? `: ${detail}` : ''}; `
+            `risk control triggered${detail ? `: ${detail}` : ''}; `
             + `pausing requests for ${RISK_CONTROL_COOLDOWN_MS / 60000} min`,
         );
         return new BilibiliRiskControlError(
-            'Bilibili 风控拦截（412）：请求过于频繁或当前网络/IP 被限制，已暂停请求，请稍后再试',
+            `Bilibili 风控拦截：请求过于频繁或当前网络/IP 被限制，已暂停请求 `
+            + `${RISK_CONTROL_COOLDOWN_MS / 60000} 分钟，请稍后再试（或切换网络/IP）`,
         );
+    };
+
+    // net.fetch 会一直占着 Chromium 的底层请求，直到 body 被读走或显式 cancel；下面每条抛错路径
+    // 都没走到 response.json()，不主动释放就要等 GC。
+    const discardBody = (response) => {
+        try {
+            Promise.resolve(response.body?.cancel?.()).catch(() => { /* 已消费或已锁定 */ });
+        } catch { /* 测试里的简化 response */ }
     };
 
     const requestJsonOnce = async (url, options = {}) => {
@@ -233,21 +285,35 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
                 },
                 body: options.body,
                 signal: controller.signal,
+                // Load-bearing under net.fetch: as soon as defaultSession's cookie jar holds any
+                // cookie for api.bilibili.com (Bilibili sets buvid3/sid on its own responses),
+                // Chromium replaces the Cookie header above with the jar's contents, so SESSDATA and
+                // bili_jct stop going out and every call silently degrades to anonymous. The bridge
+                // owns its cookie store; the jar must not participate. A no-op on the undici path.
+                credentials: 'omit',
             });
             const setCookies = absorbSetCookies(response.headers);
-            if (response.status === 412) {
-                throw tripRiskControl(`HTTP 412 for ${url}`);
+            const status = response.status;
+            if (RISK_CONTROL_HTTP_STATUSES.has(status)) {
+                discardBody(response);
+                throw tripRiskControl(`HTTP ${status} for ${url}`);
             }
             const contentType = String(response.headers.get('content-type') || '');
             if (!contentType.includes('json')) {
-                throw new Error(`Bilibili API returned non-JSON response (${response.status})`);
+                discardBody(response);
+                if (status >= 200 && status < 300) {
+                    // B 站的滑块验证就是以 200 + HTML 下发的。再戳它一次就是爬虫行为，只会把封禁挖更深，
+                    // 所以按风控信号处理：立即熔断，且不进入重试。
+                    throw tripRiskControl(`non-JSON 200 (${contentType || 'unknown type'}) for ${url}`);
+                }
+                throw new Error(`Bilibili API returned non-JSON response (${status})`);
             }
             const body = await response.json();
             // Bilibili also reports risk control inside a 200 body.
             if (body && Number(body.code) === -412) {
                 throw tripRiskControl(`code -412 for ${url}`);
             }
-            return { body, setCookies, status: response.status };
+            return { body, setCookies, status };
         } finally {
             clearTimeout(timer);
         }
@@ -307,9 +373,14 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
     // Passport endpoints are the exception: they mint the session, so they run before buvid exists.
     const PASSPORT_OPERATIONS = new Set(['qr_generate', 'qr_image', 'qr_poll', 'logout']);
     let fingerprintBootstrap = null;
+    let fingerprintAttemptAt = 0;
     const ensureDeviceFingerprint = async () => {
         if (session?.cookies?.buvid3) return;
+        // 失败的 spi 调用不能被每个业务请求各触发一次：那正好在被限流时把出站请求量翻倍，
+        // 还要各付一次 15s 超时。退避窗口内直接放行，让上层请求自己去撞真实错误。
+        if (fingerprintAttemptAt && Date.now() - fingerprintAttemptAt < FINGERPRINT_RETRY_BACKOFF_MS) return;
         if (!fingerprintBootstrap) {
+            fingerprintAttemptAt = Date.now();
             fingerprintBootstrap = runFinger()
                 .catch((error) => { logWarn('device fingerprint bootstrap failed', error); })
                 .finally(() => { fingerprintBootstrap = null; });
@@ -398,6 +469,9 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             }
             session = null;
             store.delete(SESSION_KEY);
+            // 登号把 buvid3 一起清掉了，下次调用需要重新引导指纹；退避窗口随之作废。
+            // 风控冷却故意不重置：那是 IP 级别的，登出解不开。
+            fingerprintAttemptAt = 0;
             return { ok: true };
         },
 

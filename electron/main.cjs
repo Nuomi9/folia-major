@@ -201,7 +201,8 @@ const bilibiliApiBridge = createBilibiliApiBridge({
   store,
   safeStorage,
   // Use Chromium's network stack so API traffic carries a browser-like TLS/HTTP2 fingerprint;
-  // the Bilibili WAF challenges Node's undici client far more often.
+  // the Bilibili WAF challenges Node's undici client far more often. The bridge still owns its own
+  // cookies and sends credentials:'omit' — see the note in bilibiliApiBridge.cjs before changing it.
   netFetch: (url, init) => electronNet.fetch(url, init),
 });
 const bilibiliMediaProxy = createBilibiliMediaProxy({});
