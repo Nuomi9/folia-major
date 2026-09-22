@@ -15,6 +15,7 @@ export type BilibiliOperation =
     | 'fav_created'
     | 'fav_collected'
     | 'fav_resources'
+    | 'season_archives'
     | 'audio_song_info'
     | 'audio_url'
     | 'video_view'

@@ -92,6 +92,19 @@ const cancelQr = async (_key: string): Promise<void> => {
 // 21 (video collections) and 24 (movies) are containers, not songs, so they are filtered out.
 const PLAYABLE_FAV_MEDIA_TYPES = new Set([2, 12]);
 
+// 收藏夹条目类型 21 = 订阅来的视频「合集」。它只是一个容器：fav/resource/list 对它返回 code 0 +
+// 空 medias，内容得走 seasons_archives_list。
+const SEASON_FAV_TYPE = 21;
+// fav/resource/list 在 ps>20 时直接回 code -400（实测 ps=50/100 都是）。
+const FAV_PAGE_SIZE = 20;
+// 合集接口实测 ps=100 也能一次给满；取 50 是因为它正好整除曲墙的两档批量
+// （首屏 150、后台 1000），分页边界永不重叠，不会回头重取已经显示的条目。
+const SEASON_PAGE_SIZE = 50;
+// 一次 UI 翻页最多替我们打这么多个上游分页请求：GridView 后台补全会单次索要 1000 条，
+// 不截断就是一次操作换来几十连续请求，B站 在第 7 页左右回 412。多出来的条目由调用方
+// 拿着 nextOffset/hasMore 再要一次，节奏交给上层的循环间隔去控制。
+const MAX_PAGES_PER_CALL = 3;
+
 const normalizeFavMediaSong = (media: any): UnifiedSong | null => {
     const mediaType = Number(media?.type);
     if (!PLAYABLE_FAV_MEDIA_TYPES.has(mediaType)) return null;
@@ -131,6 +144,9 @@ const normalizeFavMediaSong = (media: any): UnifiedSong | null => {
 const normalizeFavFolder = (folder: any): ProviderCollection | null => {
     const id = folder?.id ?? folder?.fid;
     if (id === undefined || id === null || id === '') return null;
+    const favType = Number(folder?.type) || 0;
+    const ownerMid = String(folder?.upper?.mid ?? folder?.mid ?? '');
+    const ownerName = String(folder?.upper?.name || '');
     return {
         providerId: 'bilibili',
         id,
@@ -140,7 +156,45 @@ const normalizeFavFolder = (folder: any): ProviderCollection | null => {
         ...(folder?.intro ? { description: String(folder.intro) } : {}),
         trackCount: Number(folder?.media_count) || 0,
         isOwned: Number(folder?.attr ?? 0) >= 0 && folder?.mid !== undefined,
-        providerData: { mlid: String(id), fid: String(folder?.fid ?? id) },
+        providerData: {
+            mlid: String(id),
+            fid: String(folder?.fid ?? id),
+            favType,
+            ownerMid,
+            ownerName,
+        },
+    };
+};
+
+// 合集里的一个视频。字段名和 fav/resource/list 的 media 不同（aid/pic/upper 都不在），
+// 作者只能取合集的上传者：archive 本身不带 mid。
+const normalizeSeasonArchiveSong = (
+    archive: any,
+    ownerMid: string,
+    ownerName: string,
+): UnifiedSong | null => {
+    const rawId = archive?.aid ?? archive?.id;
+    if (rawId === undefined || rawId === null || rawId === '') return null;
+    const avid = String(rawId);
+    const bvid = String(archive?.bvid || '');
+    const providerData: Record<string, JsonValue> = { kind: 'video', favType: 2, avid };
+    if (bvid) providerData.bvid = bvid;
+    return {
+        id: `bili-video-${avid}`,
+        name: String(archive?.title || ''),
+        artists: [{ id: ownerMid, name: ownerName || '未知上传者' }],
+        album: {
+            id: '',
+            name: '',
+            ...(archive?.pic ? { coverUrl: toHttpsImageUrl(archive.pic) } : {}),
+        },
+        durationMs: Math.max(0, Number(archive?.duration) || 0) * 1000,
+        sourceRef: {
+            kind: 'online',
+            providerId: 'bilibili',
+            mediaId: `video:${avid}`,
+            providerData,
+        },
     };
 };
 
@@ -386,29 +440,64 @@ const getPlaylistTracks = async (
     id: MediaId,
     limit: number,
     offset: number,
+    collection?: ProviderCollection,
 ): Promise<ProviderPage<UnifiedSong>> => {
     const mediaId = String(id);
-    const pageSize = 20; // fav/resource/list caps ps at 20
+    const favType = Number(collection?.providerData?.favType) || 0;
+    const ownerMid = String(collection?.providerData?.ownerMid ?? '');
+    const ownerName = String(collection?.providerData?.ownerName ?? '');
+    const isSeason = favType === SEASON_FAV_TYPE;
+    if (isSeason && !ownerMid) {
+        // 合集内容只能按作者 mid 取。缺 mid 说明拿到的是这次支持合集之前缓存的收藏夹快照，
+        // 刷一次收藏夹就有了——静默返回空列表只会被当成"B站 又挂了"。
+        throw new OnlineProviderError(
+            'invalid-response',
+            'Bilibili season collection has no owner mid; refresh the favorites list',
+            'bilibili',
+        );
+    }
+    const pageSize = isSeason ? SEASON_PAGE_SIZE : FAV_PAGE_SIZE;
     const startPage = Math.floor(offset / pageSize) + 1;
-    const endPage = Math.floor((offset + limit - 1) / pageSize) + 1;
+    const endPage = Math.floor((offset + Math.max(1, limit) - 1) / pageSize) + 1;
+    const pageCount = Math.min(endPage - startPage + 1, MAX_PAGES_PER_CALL);
 
-    const medias: any[] = [];
+    const songs: UnifiedSong[] = [];
     let total = 0;
-    for (let page = startPage; page <= endPage; page += 1) {
-        const data = await requestBilibili<any>('fav_resources', { mediaId, pn: page, ps: pageSize });
-        const pageMedias = Array.isArray(data?.medias) ? data.medias : [];
-        total = Number(data?.info?.media_count) || total;
-        medias.push(...pageMedias);
-        if (pageMedias.length < pageSize) break;
+    let reachedEnd = false;
+    for (let page = startPage; page < startPage + pageCount; page += 1) {
+        const entries: any[] = [];
+        if (isSeason) {
+            const data = await requestBilibili<any>('season_archives', {
+                seasonId: mediaId, mid: ownerMid, pn: page, ps: pageSize,
+            });
+            entries.push(...(Array.isArray(data?.archives) ? data.archives : []));
+            total = Number(data?.page?.total) || Number(data?.meta?.total) || total;
+            for (const archive of entries) {
+                const song = normalizeSeasonArchiveSong(archive, ownerMid, ownerName);
+                if (song) songs.push(song);
+            }
+        } else {
+            const data = await requestBilibili<any>('fav_resources', { mediaId, pn: page, ps: pageSize });
+            entries.push(...(Array.isArray(data?.medias) ? data.medias : []));
+            total = Number(data?.info?.media_count) || total;
+            for (const media of entries) {
+                const song = normalizeFavMediaSong(media);
+                if (song) songs.push(song);
+            }
+        }
+        if (entries.length < pageSize) {
+            reachedEnd = true;
+            break;
+        }
     }
 
-    const allSongs = medias.map(normalizeFavMediaSong).filter((song): song is UnifiedSong => song !== null);
     const sliceStart = Math.max(0, offset - (startPage - 1) * pageSize);
-    const items = allSongs.slice(sliceStart, sliceStart + limit);
+    const items = songs.slice(sliceStart, sliceStart + limit);
     return {
         items,
         total,
-        hasMore: offset + items.length < total,
+        // 上游还有分页没取完（被 MAX_PAGES_PER_CALL 截断）就如实说 hasMore，调用方自己接着要。
+        hasMore: !reachedEnd || songs.length - sliceStart > items.length || offset + items.length < total,
         nextOffset: offset + items.length,
     };
 };

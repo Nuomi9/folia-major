@@ -266,3 +266,43 @@ describe('Bilibili API bridge cookie ownership', () => {
         });
     });
 });
+
+describe('Bilibili API bridge 合集 seasons', () => {
+    const SEASON_PATH = '/x/polymer/web-space/seasons_archives_list';
+
+    it('lists a season through the space endpoint using the season owner mid', async () => {
+        const { bridge, calls } = createHarness([
+            fingerPlan(),
+            jsonResponse({ code: 0, data: { archives: [{ aid: 1, title: 'a' }], page: { total: 83 } } }),
+        ]);
+
+        const data = await bridge.request('season_archives', {
+            seasonId: '1797750', mid: '3546378898770447', pn: 2, ps: 50,
+        });
+
+        const url = new URL(calls[1].url);
+        expect(calls[1].path).toBe(SEASON_PATH);
+        // 合集作者是别人：mid 必须由调用方给，绝不能拿登录用户的 mid 顶替
+        expect(url.searchParams.get('mid')).toBe('3546378898770447');
+        expect(url.searchParams.get('season_id')).toBe('1797750');
+        expect(url.searchParams.get('page_num')).toBe('2');
+        expect(url.searchParams.get('page_size')).toBe('50');
+        expect(data.page).toEqual({ total: 83 });
+    });
+
+    it('refuses to guess the season owner instead of querying someone else\'s library', async () => {
+        const { bridge, paths } = createHarness([fingerPlan(), jsonResponse({ code: 0, data: {} })]);
+
+        await expect(bridge.request('season_archives', { seasonId: '1797750' }))
+            .rejects.toThrow(/season_archives: missing season owner mid/);
+        // 只有指纹引导打过出站，合集请求根本没发出去
+        expect(paths()).toEqual([FINGER]);
+    });
+
+    it('turns a non-zero season list code into an error', async () => {
+        const { bridge } = createHarness([fingerPlan(), jsonResponse({ code: -404, message: '啥都木有' })]);
+
+        await expect(bridge.request('season_archives', { seasonId: '9', mid: '7' }))
+            .rejects.toThrow(/season archives failed: -404/u);
+    });
+});

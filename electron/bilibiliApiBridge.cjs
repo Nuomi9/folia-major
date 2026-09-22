@@ -505,6 +505,21 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             return body.data;
         },
 
+        // 订阅来的「合集」收藏夹（folder type 21）在 fav/resource/list 里返回 code 0 + 空列表，
+        // 内容只能按合集作者的视频列表取。这里的 mid 是合集作者的 mid，不是当前登录用户，
+        // 所以必须由调用方显式传，缺了就只能报错而不是猜。
+        season_archives: async ({ seasonId, mid, pn = 1, ps = 20 }) => {
+            const targetSeasonId = String(seasonId || '').trim();
+            const ownerMid = String(mid || '').trim();
+            if (!targetSeasonId) throw new Error('season_archives: missing seasonId');
+            if (!ownerMid) throw new Error('season_archives: missing season owner mid');
+            const { body } = await requestJson(
+                `${API_BASE}/x/polymer/web-space/seasons_archives_list?mid=${encodeURIComponent(ownerMid)}&season_id=${encodeURIComponent(targetSeasonId)}&page_num=${Number(pn) || 1}&page_size=${Number(ps) || 20}`,
+            );
+            if (body?.code !== 0) throw new Error(`season archives failed: ${body?.code} ${body?.message || ''}`);
+            return body.data;
+        },
+
         // --- Playback ---
 
         audio_song_info: async ({ songid }) => {
