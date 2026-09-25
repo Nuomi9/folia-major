@@ -13,8 +13,11 @@ export type BilibiliOperation =
     | 'login_status'
     | 'logout'
     | 'fav_created'
+    | 'fav_created_paged'
     | 'fav_collected'
     | 'fav_resources'
+    | 'fav_resource_ids'
+    | 'fav_resource_infos'
     | 'season_archives'
     | 'audio_song_info'
     | 'audio_url'
@@ -34,6 +37,27 @@ export const getBilibiliBridge = (): {
         }
         : null
 );
+
+// 主进程桥的状态里带着风控冷却信息（cooling / remainingMs）。UI 拿到它才能在"加载不出来"
+// 的时候说明原因，而不是让用户以为 B站 音源挂了。
+export const fetchBilibiliBridgeStatus = async (): Promise<{
+    authenticated?: boolean;
+    cooling?: boolean;
+    remainingMs?: number;
+} | null> => {
+    const bridge = getBilibiliBridge();
+    if (!bridge) return null;
+    try {
+        const status = await bridge.getBilibiliApiStatus() as {
+            authenticated?: boolean;
+            cooling?: boolean;
+            remainingMs?: number;
+        } | null;
+        return status || null;
+    } catch {
+        return null;
+    }
+};
 
 export const getBilibiliTransportAvailability = (): { configured: boolean; reason?: 'runtime-unavailable' } => (
     getBilibiliBridge()

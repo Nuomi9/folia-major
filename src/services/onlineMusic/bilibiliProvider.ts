@@ -12,14 +12,32 @@ import type {
 import type { JsonValue } from '../../types/onlineMusic';
 import type { SongResult, UnifiedSong } from '../../types';
 import { OnlineProviderError } from '../../types/onlineMusic';
-import { getBilibiliTransportAvailability, requestBilibili } from './bilibiliTransport';
+import { fetchBilibiliBridgeStatus, getBilibiliTransportAvailability, requestBilibili } from './bilibiliTransport';
 
 // src/services/onlineMusic/bilibiliProvider.ts
-// First-iteration adapter: authentication only (QR scan login, login status, logout).
-// Library / playback capabilities land in later iterations; capabilities stay honest so the
-// Omni layer never routes a bilibili song before playback exists.
+// Adapter for the Bilibili bridge in the Electron main process: QR scan login, favorite folders
+// and seasons, audio/video playback, and lyrics borrowed from NetEase.
+// Search, albums, artists, recommendations and mutations are not implemented — capabilities stay
+// honest so the Omni layer never routes a request the adapter cannot serve.
 
 const QR_TTL_MS = 180_000; // Bilibili scan codes expire after ~3 minutes (poll code 86038).
+
+// 风控冷却是进程级状态：一旦触发，这段时间里所有 B站 请求都会失败。把它暴露出去，UI 才能
+// 显示"风控冷却中，约 xx 秒"，并且在冷却期内干脆不要发请求——撞上去只会把封禁拖更长。
+let riskControlState = { cooling: false, remainingMs: 0 };
+
+export const getBilibiliRiskControlState = () => riskControlState;
+
+export const refreshBilibiliRiskControlState = async () => {
+    const status = await fetchBilibiliBridgeStatus();
+    if (status) {
+        riskControlState = {
+            cooling: Boolean(status.cooling),
+            remainingMs: Number(status.remainingMs) || 0,
+        };
+    }
+    return riskControlState;
+};
 
 // Bilibili APIs return http:// image URLs; http subresources are blocked in the app context, which
 // renders every cover as a black card. hdslb.com and its CDN mirrors all serve https, so upgrade.
@@ -104,6 +122,19 @@ const SEASON_PAGE_SIZE = 50;
 // 不截断就是一次操作换来几十连续请求，B站 在第 7 页左右回 412。多出来的条目由调用方
 // 拿着 nextOffset/hasMore 再要一次，节奏交给上层的循环间隔去控制。
 const MAX_PAGES_PER_CALL = 3;
+// 走 ids + infos 两阶段时的批量上限：一次调用最多补 4 批 × 20 条。比逐页 list 少一半往返，
+// 而且总数来自 ids，不需要靠"页面返回不足一页"去猜是否到底。
+const FAV_INFO_BATCH_SIZE = 20;
+const MAX_INFO_BATCHES_PER_CALL = 4;
+// ids 列表在一次浏览会话里是稳定的，缓存住可以省掉每次翻页的一个额外请求。
+const FAV_IDS_CACHE_TTL_MS = 10 * 60 * 1000;
+const favIdsCache = new Map<string, { at: number; entries: { id: string; type: number; bvid: string }[] }>();
+
+// 收藏夹列表一刷新，之前缓存的条目身份就必须作废：用户可能刚收藏/取消了歌。
+export const clearBilibiliFavIdsCache = (mediaId?: string) => {
+    if (mediaId) favIdsCache.delete(mediaId);
+    else favIdsCache.clear();
+};
 
 const normalizeFavMediaSong = (media: any): UnifiedSong | null => {
     const mediaType = Number(media?.type);
@@ -248,10 +279,14 @@ const normalizeAudioSongDetail = (data: any): UnifiedSong | null => {
 const normalizeVideoSongDetail = (view: any): UnifiedSong | null => {
     if (!view?.cid) return null;
     const avid = view.avid || view.aid;
+    // UP 主名由主进程透传：原始 view 响应里有 owner，但 renderer 拿不到，之前这里判断用
+    // upper、取值用 owner，两边都不存在，结果所有视频稿件的歌手名都显示成占位串。
+    const ownerName = String(view?.ownerName || '');
+    const ownerMid = String(view?.ownerMid ?? '');
     return {
         id: `bili-video-${avid}`,
         name: String(view.title || ''),
-        artists: [{ id: '', name: view?.upper?.name ? String(view.owner.name) : 'B站视频' }],
+        artists: [{ id: ownerMid, name: ownerName || '未知上传者' }],
         album: { id: '', name: '', ...(view?.pic ? { coverUrl: toHttpsImageUrl(view.pic) } : {}) },
         durationMs: Math.max(0, Number(view?.pages?.[0]?.duration ?? view?.duration ?? 0)) * 1000,
         sourceRef: {
@@ -408,12 +443,26 @@ const getUserPlaylists = async (
     offset: number,
 ): Promise<ProviderPage<ProviderCollection>> => {
     const mid = userId;
-    // Created folders arrive as one unpaginated list; collected folders are paged (max ps = 70).
+    // 自建夹走分页版 created/list（ps<=50）：list-all 是轻量接口不带 cover，网格封面全靠它。
+    // 订阅夹的 collected/list 本身带 cover，保持一页 70。
     const [createdData, collectedFirstPage] = await Promise.allSettled([
-        requestBilibili<any>('fav_created', { mid }),
+        (async () => {
+            const list: any[] = [];
+            let pn = 1;
+            let count = Number.POSITIVE_INFINITY;
+            while (list.length < count && pn <= 4) {
+                const data = await requestBilibili<any>('fav_created_paged', { mid, pn, ps: 50 });
+                count = Number(data?.count) || 0;
+                const entries = Array.isArray(data?.list) ? data.list : [];
+                list.push(...entries);
+                if (entries.length < 50) break;
+                pn += 1;
+            }
+            return list;
+        })(),
         requestBilibili<any>('fav_collected', { mid, pn: 1, ps: 70 }),
     ]);
-    const createdList = createdData.status === 'fulfilled' ? (createdData.value?.list ?? []) : [];
+    const createdList = createdData.status === 'fulfilled' ? (createdData.value ?? []) : [];
     const collectedList = collectedFirstPage.status === 'fulfilled' ? (collectedFirstPage.value?.list ?? []) : [];
     if (createdData.status === 'rejected') {
         console.warn('[BilibiliProvider] fav-created:error', createdData.reason);
@@ -423,15 +472,77 @@ const getUserPlaylists = async (
     }
 
     const collections = [
-        ...createdList.map(normalizeFavFolder),
+        // created/list 的条目顶层没有 mid（UP 主在 upper 里），补上让 isOwned 语义不变。
+        ...createdList.map(entry => normalizeFavFolder({ ...entry, mid: entry?.upper?.mid ?? entry?.mid })),
         ...collectedList.map(normalizeFavFolder),
     ].filter((collection): collection is ProviderCollection => collection !== null);
+    // 这是一次真实的收藏夹刷新，之前缓存的条目身份不再可信。
+    clearBilibiliFavIdsCache();
 
     const items = collections.slice(offset, offset + limit);
     return {
         items,
         total: collections.length,
         hasMore: offset + limit < collections.length,
+        nextOffset: offset + items.length,
+    };
+};
+
+// 收藏夹全部条目的身份列表。`resource/ids` 不受 ps<=20 限制，一个请求就能拿到准确总数和
+// 所有 {id, type}，之后的详情按显示需要分批补，不必为了知道"还有没有"去多翻一页。
+const loadFavIds = async (mediaId: string) => {
+    const cached = favIdsCache.get(mediaId);
+    if (cached && Date.now() - cached.at < FAV_IDS_CACHE_TTL_MS) return cached.entries;
+    const data = await requestBilibili<any>('fav_resource_ids', { mediaId });
+    const list = Array.isArray(data) ? data : (Array.isArray(data?.list) ? data.list : []);
+    const entries = list
+        .filter((entry: any) => PLAYABLE_FAV_MEDIA_TYPES.has(Number(entry?.type)))
+        .map((entry: any) => ({
+            id: String(entry?.id ?? ''),
+            type: Number(entry?.type),
+            bvid: String(entry?.bvid || entry?.bv_id || ''),
+        }))
+        .filter((entry: { id: string }) => Boolean(entry.id));
+    favIdsCache.set(mediaId, { at: Date.now(), entries });
+    return entries;
+};
+
+// 逐页 fav/resource/list 的老通路。ids/infos 任一环节出错时兜底，避免新通路把整个收藏夹
+// 变成"拉不出来"。
+const getPlaylistTracksByPages = async (
+    mediaId: string,
+    limit: number,
+    offset: number,
+): Promise<ProviderPage<UnifiedSong>> => {
+    const pageSize = FAV_PAGE_SIZE;
+    const startPage = Math.floor(offset / pageSize) + 1;
+    const endPage = Math.floor((offset + Math.max(1, limit) - 1) / pageSize) + 1;
+    const pageCount = Math.min(endPage - startPage + 1, MAX_PAGES_PER_CALL);
+
+    const songs: UnifiedSong[] = [];
+    let total = 0;
+    let reachedEnd = false;
+    for (let page = startPage; page < startPage + pageCount; page += 1) {
+        const data = await requestBilibili<any>('fav_resources', { mediaId, pn: page, ps: pageSize });
+        const medias: any[] = Array.isArray(data?.medias) ? data.medias : [];
+        total = Number(data?.info?.media_count) || total;
+        for (const media of medias) {
+            const song = normalizeFavMediaSong(media);
+            if (song) songs.push(song);
+        }
+        if (medias.length < pageSize) {
+            reachedEnd = true;
+            break;
+        }
+    }
+
+    const sliceStart = Math.max(0, offset - (startPage - 1) * pageSize);
+    const items = songs.slice(sliceStart, sliceStart + limit);
+    return {
+        items,
+        total,
+        // 上游还有分页没取完（被 MAX_PAGES_PER_CALL 截断）就如实说 hasMore，调用方自己接着要。
+        hasMore: !reachedEnd || songs.length - sliceStart > items.length || offset + items.length < total,
         nextOffset: offset + items.length,
     };
 };
@@ -456,50 +567,86 @@ const getPlaylistTracks = async (
             'bilibili',
         );
     }
-    const pageSize = isSeason ? SEASON_PAGE_SIZE : FAV_PAGE_SIZE;
-    const startPage = Math.floor(offset / pageSize) + 1;
-    const endPage = Math.floor((offset + Math.max(1, limit) - 1) / pageSize) + 1;
-    const pageCount = Math.min(endPage - startPage + 1, MAX_PAGES_PER_CALL);
+    if (isSeason) {
+        // 合集（type 21）只有 season_archives 一条路：fav/resource/* 对它一律返回空。
+        const pageSize = SEASON_PAGE_SIZE;
+        const startPage = Math.floor(offset / pageSize) + 1;
+        const endPage = Math.floor((offset + Math.max(1, limit) - 1) / pageSize) + 1;
+        const pageCount = Math.min(endPage - startPage + 1, MAX_PAGES_PER_CALL);
 
-    const songs: UnifiedSong[] = [];
-    let total = 0;
-    let reachedEnd = false;
-    for (let page = startPage; page < startPage + pageCount; page += 1) {
-        const entries: any[] = [];
-        if (isSeason) {
+        const songs: UnifiedSong[] = [];
+        let total = 0;
+        let reachedEnd = false;
+        for (let page = startPage; page < startPage + pageCount; page += 1) {
             const data = await requestBilibili<any>('season_archives', {
                 seasonId: mediaId, mid: ownerMid, pn: page, ps: pageSize,
             });
-            entries.push(...(Array.isArray(data?.archives) ? data.archives : []));
+            const archives: any[] = Array.isArray(data?.archives) ? data.archives : [];
             total = Number(data?.page?.total) || Number(data?.meta?.total) || total;
-            for (const archive of entries) {
+            for (const archive of archives) {
                 const song = normalizeSeasonArchiveSong(archive, ownerMid, ownerName);
                 if (song) songs.push(song);
             }
-        } else {
-            const data = await requestBilibili<any>('fav_resources', { mediaId, pn: page, ps: pageSize });
-            entries.push(...(Array.isArray(data?.medias) ? data.medias : []));
-            total = Number(data?.info?.media_count) || total;
-            for (const media of entries) {
-                const song = normalizeFavMediaSong(media);
-                if (song) songs.push(song);
+            if (archives.length < pageSize) {
+                reachedEnd = true;
+                break;
             }
         }
-        if (entries.length < pageSize) {
-            reachedEnd = true;
-            break;
-        }
+
+        const sliceStart = Math.max(0, offset - (startPage - 1) * pageSize);
+        const items = songs.slice(sliceStart, sliceStart + limit);
+        return {
+            items,
+            total,
+            hasMore: !reachedEnd || songs.length - sliceStart > items.length || offset + items.length < total,
+            nextOffset: offset + items.length,
+        };
     }
 
-    const sliceStart = Math.max(0, offset - (startPage - 1) * pageSize);
-    const items = songs.slice(sliceStart, sliceStart + limit);
-    return {
-        items,
-        total,
-        // 上游还有分页没取完（被 MAX_PAGES_PER_CALL 截断）就如实说 hasMore，调用方自己接着要。
-        hasMore: !reachedEnd || songs.length - sliceStart > items.length || offset + items.length < total,
-        nextOffset: offset + items.length,
-    };
+    // 普通收藏夹：ids 拿全部身份 → infos 按显示需要分批补详情。桥那边对只读请求放行到
+    // 3 路并发，这些批次是并行发出去的，不再是逐页排队。
+    try {
+        const entries = await loadFavIds(mediaId);
+        const total = entries.length;
+        const start = Math.max(0, offset);
+        const wanted = entries.slice(start, start + Math.max(1, limit));
+        const capped = wanted.slice(0, MAX_INFO_BATCHES_PER_CALL * FAV_INFO_BATCH_SIZE);
+
+        const batches: (typeof entries)[] = [];
+        for (let index = 0; index < capped.length; index += FAV_INFO_BATCH_SIZE) {
+            batches.push(capped.slice(index, index + FAV_INFO_BATCH_SIZE));
+        }
+
+        const songs: UnifiedSong[] = [];
+        const results = await Promise.all(batches.map(async (batch) => {
+            const data = await requestBilibili<any>('fav_resource_infos', {
+                resources: batch.map(entry => `${entry.id}:${entry.type}`).join(','),
+            });
+            const infos: any[] = Array.isArray(data) ? data : [];
+            return infos
+                // infos 的条目结构和 fav/resource/list 的 media 一致，直接复用归一化
+                .map((info: any) => normalizeFavMediaSong({ ...info, bvid: info?.bvid || info?.bv_id }))
+                .filter((song): song is UnifiedSong => song !== null);
+        }));
+        results.forEach(list => songs.push(...list));
+
+        // 分页按"消费掉的 id 数"推进，而不是拿到的条目数：收藏夹里的失效稿件不会出现在
+        // infos 响应里，若按条目数推进会让 offset 与 ids 索引错位（重复拉、漏拉、提前收尾）。
+        const consumed = capped.length;
+        return {
+            items: songs,
+            total,
+            hasMore: start + consumed < total,
+            nextOffset: start + consumed,
+        };
+    } catch (error) {
+        console.warn('[BilibiliProvider] fav ids/infos path failed; falling back to paged list', {
+            name: error instanceof Error ? error.name : 'Error',
+            message: error instanceof Error ? error.message : String(error),
+        });
+        favIdsCache.delete(mediaId);
+        return getPlaylistTracksByPages(mediaId, limit, offset);
+    }
 };
 
 export const bilibiliProvider: OnlineMusicProvider = {

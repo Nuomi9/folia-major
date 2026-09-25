@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from 'react';
 import { omni } from '../services/onlineMusic/omni';
+import { refreshBilibiliRiskControlState } from '../services/onlineMusic/bilibiliProvider';
 import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccountStore';
 import type {
     ProviderUser,
@@ -9,8 +10,8 @@ import {
 } from '../services/onlineMusic/providerAccountCache';
 
 // src/hooks/useBilibiliLibrary.ts
-// First iteration: login-state hydration only. Playlist/favorite hydration joins this hook when
-// the bilibili library capability ships; until then refresh() resolves the account and stops.
+// Hydrates the Bilibili account and its favorite folders on one refresh pass, and refuses to
+// touch the API while the main-process bridge is inside a risk-control cooldown.
 
 export const useBilibiliLibrary = () => {
     const updateAccount = useOnlineProviderAccountStore(state => state.updateAccount);
@@ -67,6 +68,22 @@ export const useBilibiliLibrary = () => {
             });
             return false;
         }
+        // 冷却期内不要发任何 B站 请求：发了也只会被桥直接拒掉，还会把退避窗口继续拉长。
+        const riskControl = await refreshBilibiliRiskControlState();
+        if (riskControl.cooling) {
+            updateAccount('bilibili', {
+                status: 'anonymous',
+                user: null,
+                error: 'risk-control',
+                hydration: 'ready',
+                freshness: 'stale',
+            });
+            console.info('[BilibiliLibrary] refresh:skipped-risk-control', {
+                remainingMs: riskControl.remainingMs,
+            });
+            return false;
+        }
+
         updateAccount('bilibili', {
             status: 'unknown',
             hydration: 'loading',

@@ -2,9 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // test/unit/onlineMusic/bilibiliProvider.test.ts
 //
-// 锁两件事：订阅来的「合集」收藏夹（folder type 21）必须走 season_archives —— fav/resource/list
-// 对它返回空列表，整夹歌曲就是这么"拉不出来"的；以及一次翻页最多打 MAX_PAGES_PER_CALL 个上游
-// 分页请求，曲墙后台补全单次索要 1000 条时不能再把它变成 50 连续请求（B站 会回 412）。
+// 锁三件事：订阅来的「合集」收藏夹（folder type 21）必须走 season_archives —— fav/resource/*
+// 对它返回空列表，整夹歌曲就是这么"拉不出来"的；普通收藏夹走 ids + infos 两阶段，一次调用最多
+// 补 4 批详情，曲墙后台补全单次索要 1000 条时不能再把它变成几十个排队请求（B站 会回 412）；
+// 以及视频稿件的 UP 主名要能从主进程透传出来，不能永远显示占位串。
 
 const requestMock = vi.hoisted(() => vi.fn());
 
@@ -13,7 +14,7 @@ vi.mock('@/services/onlineMusic/bilibiliTransport', () => ({
     requestBilibili: requestMock,
 }));
 
-import { bilibiliProvider } from '@/services/onlineMusic/bilibiliProvider';
+import { bilibiliProvider, clearBilibiliFavIdsCache } from '@/services/onlineMusic/bilibiliProvider';
 import type { ProviderCollection } from '@/types/onlineMusic';
 
 const seasonFolder: ProviderCollection = {
@@ -47,13 +48,19 @@ const archive = (aid: number, title = `合集条目${aid}`) => ({
 
 const getPlaylistTracks = (id: number | string, limit: number, offset: number, collection?: ProviderCollection) =>
     bilibiliProvider.catalog!.getPlaylistTracks!(id, limit, offset, collection);
+// 收藏夹内容的身份列表（resource/ids）与详情（resource/infos）
+const favIds = (count: number, start = 100) =>
+    Array.from({ length: count }, (_, i) => ({ id: start + i, type: 2, bvid: `BV${start + i}` }));
 
-const requestedPn = (operation: string) =>
-    requestMock.mock.calls.filter(call => call[0] === operation).map(call => Number(call[1].pn));
+const requestedResources = () =>
+    requestMock.mock.calls
+        .filter(call => call[0] === 'fav_resource_infos')
+        .map(call => String(call[1].resources));
 
 describe('bilibiliProvider catalog', () => {
     beforeEach(() => {
         requestMock.mockReset();
+        clearBilibiliFavIdsCache();
     });
 
     it('reads 合集 folders through season_archives instead of the empty fav_resources list', async () => {
@@ -88,50 +95,94 @@ describe('bilibiliProvider catalog', () => {
         expect(page.items[0].album?.coverUrl).toBe('https://i0.hdslb.com/bfs/archive/1000.jpg');
     });
 
-    it('keeps ordinary favorite folders on fav_resources', async () => {
-        requestMock.mockResolvedValue({
-            medias: [videoMedia(11), videoMedia(12)],
-            info: { media_count: 2 },
+    it('reads ordinary favorite folders through ids + infos instead of paging one by one', async () => {
+        requestMock.mockImplementation(async (operation: string, params: any = {}) => {
+            if (operation === 'fav_resource_ids') return favIds(2, 11);
+            const ids = String(params.resources || '').split(',').map(entry => Number(entry.split(':')[0]));
+            return ids.map(id => videoMedia(id));
         });
 
         const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
 
-        expect(requestMock.mock.calls.map(call => call[0])).toEqual(['fav_resources']);
-        expect(requestMock.mock.calls[0][1]).toMatchObject({ mediaId: '1234', pn: 1, ps: 20 });
+        expect(requestMock.mock.calls.map(call => call[0])).toEqual(['fav_resource_ids', 'fav_resource_infos']);
+        expect(requestedResources()).toEqual(['11:2,12:2']);
         expect(page.items.map(song => song.id)).toEqual(['bili-video-11', 'bili-video-12']);
         expect(page.total).toBe(2);
         expect(page.hasMore).toBe(false);
         expect(page.nextOffset).toBe(2);
     });
 
-    it('caps upstream page requests per call and lets the caller keep paging', async () => {
-        requestMock.mockImplementation(async (_operation: string, params: any = {}) => ({
-            medias: Array.from({ length: 20 }, (_, i) => videoMedia(params.pn * 100 + i)),
-            info: { media_count: 1178 },
-        }));
+    it('caps detail batches per call and lets the caller keep paging', async () => {
+        requestMock.mockImplementation(async (operation: string, params: any = {}) => {
+            if (operation === 'fav_resource_ids') return favIds(200);
+            const ids = String(params.resources || '').split(',').map(entry => Number(entry.split(':')[0]));
+            return ids.map(id => videoMedia(id));
+        });
 
         // 曲墙后台补全一次要 1000 条
         const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
 
-        expect(requestedPn('fav_resources')).toEqual([1, 2, 3]);
-        expect(page.items).toHaveLength(60);
+        // 4 批 x 20 条：比逐页 list 少一半往返，而且总数是 ids 给的，不用靠"页面不满"去猜。
+        expect(requestedResources()).toHaveLength(4);
+        expect(requestedResources()[0].split(',')).toHaveLength(20);
+        expect(page.items).toHaveLength(80);
+        expect(page.total).toBe(200);
         expect(page.hasMore).toBe(true);
-        expect(page.nextOffset).toBe(60);
+        expect(page.nextOffset).toBe(80);
 
-        const next = await getPlaylistTracks('1234', 1000, 60, favFolder);
-        expect(requestedPn('fav_resources').slice(3)).toEqual([4, 5, 6]);
-        expect(next.items[0].id).toBe('bili-video-400');
+        const next = await getPlaylistTracks('1234', 1000, 80, favFolder);
+        expect(next.items[0].id).toBe('bili-video-180');
     });
 
-    it('does not claim more pages than the folder has', async () => {
-        requestMock.mockImplementation(async (_operation: string, params: any = {}) => ({
-            medias: params.pn === 1 ? Array.from({ length: 20 }, (_, i) => videoMedia(i)) : [],
-            info: { media_count: 20 },
-        }));
+    it('does not claim more entries than the folder has', async () => {
+        requestMock.mockImplementation(async (operation: string, params: any = {}) => {
+            if (operation === 'fav_resource_ids') return favIds(20);
+            const ids = String(params.resources || '').split(',').map(entry => Number(entry.split(':')[0]));
+            return ids.map(id => videoMedia(id));
+        });
 
         const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
 
-        expect(requestedPn('fav_resources')).toEqual([1, 2]);
+        expect(requestedResources()).toHaveLength(1);
+        expect(page.items).toHaveLength(20);
+        expect(page.hasMore).toBe(false);
+    });
+
+    it('falls back to paged fav_resources when the ids path fails', async () => {
+        // ids 接口挂了也不能让整个收藏夹变成"拉不出来"
+        requestMock.mockImplementation(async (operation: string, params: any = {}) => {
+            if (operation === 'fav_resource_ids') throw new Error('resource ids failed: -400');
+            if (operation === 'fav_resources') {
+                return { medias: [videoMedia(params.pn * 100)], info: { media_count: 1 } };
+            }
+            return [];
+        });
+
+        const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
+
+        expect(requestMock.mock.calls.some(call => call[0] === 'fav_resources')).toBe(true);
+        expect(page.items.map(song => song.id)).toEqual(['bili-video-100']);
+    });
+
+    it('advances paging by consumed ids even when dead entries drop out of infos', async () => {
+        // 回归点：收藏夹里的失效稿件不会出现在 infos 响应里。若按"拿到的条目数"推进
+        // nextOffset，offset 会和 ids 索引错位（重复拉、漏拉、提前收尾）。
+        const allIds = favIds(30);
+        const alive = new Set(allIds.filter(entry => entry.id % 2 === 0).map(entry => entry.id));
+        requestMock.mockImplementation(async (operation: string, params: any = {}) => {
+            if (operation === 'fav_resource_ids') return allIds;
+            const requested = String(params.resources || '')
+                .split(',')
+                .map(entry => Number(entry.split(':')[0]))
+                .filter(id => alive.has(id));
+            return requested.map(id => videoMedia(id));
+        });
+
+        const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
+
+        expect(page.items).toHaveLength(15);
+        // 30 个 id 全部消费掉，哪怕只有 15 个有效
+        expect(page.nextOffset).toBe(30);
         expect(page.hasMore).toBe(false);
     });
 
@@ -145,12 +196,18 @@ describe('bilibiliProvider catalog', () => {
         expect(requestMock).not.toHaveBeenCalled();
     });
 
-    it('carries folder type and author through getUserPlaylists so tracks can be routed', async () => {
-        requestMock.mockImplementation(async (operation: string) => (operation === 'fav_created'
-            ? { list: [{ id: 1234, fid: 1234, title: '默认收藏夹', media_count: 2, mid: 42 }] }
-            : { list: [{ id: 1797750, fid: 0, title: '【悬念剧场】', media_count: 83, type: 21, upper: { mid: 3546378898770447, name: '竖了个三' } }] }));
+    it('carries folder type, author and cover through getUserPlaylists so tracks can be routed', async () => {
+        // 回归点：list-all 不带 cover，网格里的文件夹封面全靠分页版 created/list。
+        requestMock.mockImplementation(async (operation: string) => (operation === 'fav_created_paged'
+            ? { count: 1, list: [{ id: 1234, fid: 1234, title: '默认收藏夹', media_count: 2, cover: 'http://i0.hdslb.com/fav/1234.png', upper: { mid: 42, name: '我自己' } }] }
+            : { list: [{ id: 1797750, fid: 0, title: '【悬念剧场】', media_count: 83, type: 21, cover: 'http://i0.hdslb.com/fav/1797750.png', upper: { mid: 3546378898770447, name: '竖了个三' } }] }));
 
         const page = await bilibiliProvider.library!.getUserPlaylists('42', 50, 0);
+
+        expect(page.items.map(c => c.coverUrl)).toEqual([
+            'https://i0.hdslb.com/fav/1234.png',
+            'https://i0.hdslb.com/fav/1797750.png',
+        ]);
 
         expect(page.items.map(collection => collection.providerData?.favType)).toEqual([0, 21]);
         expect(page.items[1].providerData).toMatchObject({
@@ -159,5 +216,31 @@ describe('bilibiliProvider catalog', () => {
         });
         // 自己的收藏夹没有 type 字段，必须留在 fav_resources 通路上
         expect(page.items[0].providerData).toMatchObject({ ownerMid: '42' });
+    });
+});
+
+describe('bilibiliProvider playback', () => {
+    beforeEach(() => {
+        requestMock.mockReset();
+    });
+
+    it('carries the video uploader through the bridge payload', async () => {
+        // 回归点：以前判断用 upper、取值用 owner，两个字段都不存在，歌手名恒为占位串。
+        requestMock.mockResolvedValue({
+            bvid: 'BV42',
+            avid: 42,
+            cid: 7,
+            title: '标题',
+            pic: 'http://i0.hdslb.com/bfs/archive/42.jpg',
+            ownerMid: 7,
+            ownerName: '上传者',
+            pages: [{ cid: 7, part: '1', duration: 100 }],
+        });
+
+        const song = await bilibiliProvider.playback!.getSongDetail('video:42');
+
+        expect(song?.artists).toEqual([{ id: '7', name: '上传者' }]);
+        expect(song?.album?.coverUrl).toBe('https://i0.hdslb.com/bfs/archive/42.jpg');
+        expect(song?.durationMs).toBe(100_000);
     });
 });

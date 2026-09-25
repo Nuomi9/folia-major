@@ -58,9 +58,16 @@ const createBilibiliMediaProxy = ({ logWarn }) => {
                 return new Response('Bad request', { status: 400 });
             }
 
-            if (!isAllowedRemoteUrl(primaryUrl) || (altUrl && !isAllowedRemoteUrl(altUrl))) {
+            if (!isAllowedRemoteUrl(primaryUrl)) {
                 warn(`blocked non-allowlist remote host: ${primaryUrl.slice(0, 120)}`);
                 return new Response('Forbidden remote host', { status: 403 });
+            }
+            // B 站 PCDN 的 backup_url 常是纯 IP 直连形态（如 http://122.x.x.x:8082/...），
+            // 无法用域名白名单校验。alt 只是备用线路，忽略它即可，主线路照播——
+            // 之前 alt 不在白名单会把整个请求 403，播放表现就是永远转圈。
+            if (altUrl && !isAllowedRemoteUrl(altUrl)) {
+                warn(`ignoring non-allowlist alt host: ${altUrl.slice(0, 120)}`);
+                altUrl = null;
             }
 
             // Bilibili PCDN nodes are flaky: connections get closed or return empty replies at
@@ -75,6 +82,7 @@ const createBilibiliMediaProxy = ({ logWarn }) => {
                         break;
                     }
                     lastError = new Error(`upstream status ${response.status}`);
+                    lastError.upstreamStatus = response.status;
                     warn(`upstream fetch failed with status ${response.status}`);
                 } catch (error) {
                     lastError = error;
@@ -82,7 +90,10 @@ const createBilibiliMediaProxy = ({ logWarn }) => {
                 }
             }
             if (!upstream) {
-                return new Response(`Upstream error: ${lastError instanceof Error ? lastError.message : 'unknown'}`, { status: 502 });
+                // 上游给出了明确状态码（如 416 Range 越界——PCDN 节点只缓存部分内容）时原样
+                // 透传，audio 元素能理解这些语义；只有真正的网络异常才用 502。
+                const status = typeof lastError?.upstreamStatus === 'number' ? lastError.upstreamStatus : 502;
+                return new Response(`Upstream error: ${lastError instanceof Error ? lastError.message : 'unknown'}`, { status });
             }
             const responseHeaders = new Headers();
             const contentType = upstream.headers.get('content-type');

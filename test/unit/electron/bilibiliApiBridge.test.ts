@@ -13,6 +13,7 @@ const { createBilibiliApiBridge } = require('../../../electron/bilibiliApiBridge
 const SESSION_KEY = 'BILIBILI_SESSION_V1';
 const RISK_CONTROL_KEY = 'BILIBILI_RISK_CONTROL_V1';
 const FINGER = '/x/frontend/finger/spi';
+const TICKET = '/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket';
 const NAV = '/x/web-interface/nav';
 
 const createStore = () => {
@@ -48,6 +49,8 @@ const jsonResponse = (json: unknown) => ({ status: 200, json, contentType: 'appl
 const fingerPlan = (b3 = 'BUVID3', b4 = 'BUVID4') => jsonResponse({ code: 0, data: { b_3: b3, b_4: b4 } });
 const navPlan = (over: Record<string, unknown> = {}) =>
     jsonResponse({ code: 0, data: { isLogin: false, ...over } });
+const ticketPlan = (ticket = 'TICKET') =>
+    jsonResponse({ code: 0, data: { ticket, created_at: 0, ttl: 259200 } });
 
 /**
  * 造一个桥 + 出站请求记录器。`plan` 可以是数组（按次序应答，越界重复最后一个）
@@ -95,15 +98,38 @@ const createHarness = (
 
 describe('Bilibili API bridge device-fingerprint bootstrap', () => {
     it('calls finger before the first API request and reuses its buvid', async () => {
-        const { bridge, calls, paths } = createHarness([fingerPlan(), navPlan()]);
+        const { bridge, calls, paths } = createHarness([fingerPlan(), ticketPlan(), navPlan()]);
 
         await bridge.request('login_status');
 
-        expect(paths().slice(0, 2)).toEqual([FINGER, NAV]);
+        expect(paths().slice(0, 3)).toEqual([FINGER, TICKET, NAV]);
         // finger 自己还不能带 cookie；拿到 buvid 后立刻用于后续请求。
         expect(calls[0].headers.Cookie).toBeUndefined();
-        expect(calls[1].headers.Cookie).toContain('buvid3=BUVID3');
-        expect(calls[1].headers.Cookie).toContain('buvid4=BUVID4');
+        const business = calls[2];
+        expect(business.headers.Cookie).toContain('buvid3=BUVID3');
+        expect(business.headers.Cookie).toContain('buvid4=BUVID4');
+    });
+
+    it('mints bili_ticket once and sends it with the business request', async () => {
+        const { bridge, calls, paths } = createHarness([fingerPlan(), ticketPlan(), navPlan(), navPlan()]);
+
+        await bridge.request('login_status');
+        await bridge.request('login_status');
+
+        // 票据有 3 天有效期，第二次业务请求不该再去换票。
+        expect(paths().filter(path => path === TICKET)).toHaveLength(1);
+        expect(calls[2].headers.Cookie).toContain('bili_ticket=TICKET');
+        expect(calls[3].headers.Cookie).toContain('bili_ticket=TICKET');
+    });
+
+    it('keeps working when the ticket endpoint fails', async () => {
+        // 换票是尽力而为：失败不能拖垮整个 provider。
+        const { bridge, paths } = createHarness([fingerPlan(), jsonResponse({ code: -1 }), navPlan()]);
+
+        await expect(bridge.request('login_status')).resolves.toEqual({ authenticated: false });
+
+        expect(paths()).toContain(NAV);
+        expect(paths().filter(path => path === TICKET)).toHaveLength(1);
     });
 
     it('does not bootstrap in front of passport calls that mint the session', async () => {
@@ -130,8 +156,8 @@ describe('Bilibili API bridge device-fingerprint bootstrap', () => {
     it('lets logout re-arm the fingerprint bootstrap for the next sign-in', async () => {
         const { bridge, paths } = createHarness([
             fingerPlan(),
+            ticketPlan(),
             navPlan({ isLogin: true, mid: 42, uname: 'u' }),
-            jsonResponse({ code: 0 }),
             fingerPlan('BUVID3-NEW'),
             navPlan(),
         ]);
@@ -174,13 +200,14 @@ describe('Bilibili API bridge risk control', () => {
     });
 
     it('never retries a blocked call but does retry a transient failure', async () => {
-        const transient = createHarness([fingerPlan(), new Error('ECONNRESET'), navPlan()]);
+        const transient = createHarness([fingerPlan(), ticketPlan(), new Error('ECONNRESET'), navPlan()]);
         await expect(transient.bridge.request('login_status')).resolves.toEqual({ authenticated: false });
         expect(transient.paths().filter(path => path === NAV)).toHaveLength(2);
 
+        // 引导阶段（换票）就被拦时，业务请求根本不该发出去——冷却期零出站。
         const blocked = createHarness([fingerPlan(), { status: 412, contentType: 'text/html' }]);
         await expect(blocked.bridge.request('login_status')).rejects.toThrow();
-        expect(blocked.paths().filter(path => path === NAV)).toHaveLength(1);
+        expect(blocked.paths().filter(path => path === NAV)).toHaveLength(0);
     });
 
     it('cancels the response body on the paths that throw before reading it', async () => {
@@ -223,23 +250,24 @@ describe('Bilibili API bridge risk control', () => {
         await first.bridge.request('login_status');
         expect(readEnvelope(store, safeStorage).cookies).toMatchObject({ buvid3: 'BUVID3-KEEP', buvid4: 'BUVID4-KEEP' });
 
-        const second = createHarness([navPlan()], { store, safeStorage });
+        const second = createHarness([ticketPlan('TICKET-KEEP'), navPlan()], { store, safeStorage });
         await second.bridge.request('login_status');
 
-        expect(second.paths()).toEqual([NAV]);
+        // buvid 已经落盘，重启后不该再探 finger；换票是另一条引导，不算重复探测指纹。
+        expect(second.paths()).not.toContain(FINGER);
+        expect(second.paths()).toContain(NAV);
         expect(second.calls[0].headers.Cookie).toContain('buvid3=BUVID3-KEEP');
     });
 });
 
 describe('Bilibili API bridge cookie ownership', () => {
     it('asks the transport to keep the session cookie jar out of the request', async () => {
-        const { bridge, calls } = createHarness([fingerPlan(), navPlan()]);
+        const { bridge, calls } = createHarness([fingerPlan(), ticketPlan(), navPlan()]);
 
         await bridge.request('login_status');
 
-        expect(calls).toHaveLength(2);
-        expect(calls[0].credentials).toBe('omit');
-        expect(calls[1].credentials).toBe('omit');
+        expect(calls).toHaveLength(3);
+        expect(calls.every(call => call.credentials === 'omit')).toBe(true);
     });
 
     it('parses Set-Cookie without getSetCookie(), keeping Expires commas intact', async () => {
@@ -273,6 +301,7 @@ describe('Bilibili API bridge 合集 seasons', () => {
     it('lists a season through the space endpoint using the season owner mid', async () => {
         const { bridge, calls } = createHarness([
             fingerPlan(),
+            ticketPlan(),
             jsonResponse({ code: 0, data: { archives: [{ aid: 1, title: 'a' }], page: { total: 83 } } }),
         ]);
 
@@ -280,8 +309,8 @@ describe('Bilibili API bridge 合集 seasons', () => {
             seasonId: '1797750', mid: '3546378898770447', pn: 2, ps: 50,
         });
 
-        const url = new URL(calls[1].url);
-        expect(calls[1].path).toBe(SEASON_PATH);
+        const url = new URL(calls[2].url);
+        expect(calls[2].path).toBe(SEASON_PATH);
         // 合集作者是别人：mid 必须由调用方给，绝不能拿登录用户的 mid 顶替
         expect(url.searchParams.get('mid')).toBe('3546378898770447');
         expect(url.searchParams.get('season_id')).toBe('1797750');
@@ -295,8 +324,8 @@ describe('Bilibili API bridge 合集 seasons', () => {
 
         await expect(bridge.request('season_archives', { seasonId: '1797750' }))
             .rejects.toThrow(/season_archives: missing season owner mid/);
-        // 只有指纹引导打过出站，合集请求根本没发出去
-        expect(paths()).toEqual([FINGER]);
+        // 只有引导（指纹 + 换票）打过出站，合集请求根本没发出去
+        expect(paths()).toEqual([FINGER, TICKET]);
     });
 
     it('turns a non-zero season list code into an error', async () => {

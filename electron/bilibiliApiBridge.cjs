@@ -29,7 +29,12 @@ const QR_POLL_STATE = {
     86101: 'waiting',
 };
 
-const SESSION_COOKIE_KEYS = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid', 'buvid3', 'buvid4'];
+// bili_ticket 是风控票据，buvid3/4 是设备指纹：它们不带身份，但必须随每个请求送出，
+// 所以和登录凭据一起持久化。
+const SESSION_COOKIE_KEYS = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid', 'buvid3', 'buvid4', 'bili_ticket'];
+// 判断"已登录"只看真正带身份的 cookie。指纹 + 票据在任何匿名请求里都会被设置，
+// 把它们算进来会让未登录状态被误判成已登录。
+const AUTHENTICATION_COOKIE_KEYS = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'];
 
 // --- WBI request signing (ported from Biu's electron/ipc/api/wbi.ts) ---
 const crypto = require('crypto');
@@ -63,16 +68,33 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Bilibili's WAF answers abusive bursts with HTTP 412 (and `code: -412` inside a 200 body), and
 // rate-limits with 429/503. Once tripped it keeps rejecting the whole IP + session for a while, so
 // the bridge stops sending for a cooldown window instead of retrying straight back into a longer ban.
-const RISK_CONTROL_COOLDOWN_MS = 10 * 60 * 1000;
+// 冷却改成"基础窗口 + 连续触发指数退避"，而不是固定 10 分钟。B站的 WAF 拦的是突发流量，
+// 一次 412 绝大多数是偶发；固定冻 10 分钟只会把一次小抖动变成"整个 B站 音源消失十分钟"。
+const RISK_CONTROL_COOLDOWN_BASE_MS = 60 * 1000;
+const RISK_CONTROL_COOLDOWN_MAX_MS = 8 * 60 * 1000;
 const RISK_CONTROL_HTTP_STATUSES = new Set([412, 429, 503]);
 // A blocked finger/spi endpoint must not be re-probed ahead of every business request, or the
 // bootstrap doubles our request volume precisely while Bilibili is throttling us.
 const FINGERPRINT_RETRY_BACKOFF_MS = 60 * 1000;
-// Serialized, paced requests: Bilibili rate-limits fav/playurl aggressively and treats parallel
-// bursts as scraping, so keep one request in flight with a small gap between them.
-const MIN_REQUEST_GAP_MS = 300;
+// 只读请求（收藏夹、合集、view/playurl）允许少量并发，但出站节奏仍然限流：B站 限的是突发，
+// 不是并发数。单条串行链 + 300ms 间隔曾让"后台补全 1000 条"退化成 50 个排队请求（约 20 秒），
+// 而真正需要串行保序的只有登录/passport 那一类。
+const MIN_REQUEST_GAP_MS = 70;
+const READ_CONCURRENCY = 3;
+// Operations that mint or rotate the session: they must stay strictly ordered, otherwise two
+// concurrent logins can land on the same qrcode key and the wrong one persists.
+const SERIALIZED_PATH_PREFIXES = [
+    '/x/passport-login/',
+    '/x/frontend/finger/',
+    '/bapis/bilibili.api.ticket.v1.Ticket/',
+];
 const REQUEST_TIMEOUT_MS = 15_000;
 const REQUEST_MAX_ATTEMPTS = 2;
+
+// bili_ticket 是 B站 风控的重要入参（缺失时 playurl/nav 更容易被判 -412）。它自己有 3 天有效
+// 期，过期前主动续，别等到被拦了才发现。
+const BILI_TICKET_TTL_MS = 3 * 24 * 60 * 60 * 1000;
+const BILI_TICKET_HMAC_KEY = 'XgwSnGZ1p';
 
 class BilibiliRiskControlError extends Error {
     constructor(message) {
@@ -229,8 +251,11 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
     };
 
     let riskControlUntil = -1; // -1 = 还没从 store 读过；桥在 app ready 前就构造好了，别在模块求值期读写 store
-    let requestChain = Promise.resolve();
+    let riskControlStrike = 0; // 连续被拦次数，决定冷却窗口长度；一次成功请求后清零
+    let requestChain = Promise.resolve(); // 只用于需要严格保序的 passport / 指纹请求
     let lastRequestAt = 0;
+    let inFlightReads = 0;
+    const readWaiters = [];
 
     const assertNotCoolingDown = () => {
         if (riskControlUntil < 0) riskControlUntil = readPersistedCooldown();
@@ -238,25 +263,56 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
         if (remaining <= 0) {
             if (riskControlUntil > 0) {
                 riskControlUntil = 0;
+                riskControlStrike = 0;
                 clearPersistedCooldown();
             }
             return;
         }
         throw new BilibiliRiskControlError(
-            `Bilibili 风控冷却中，请约 ${Math.ceil(remaining / 60000)} 分钟后重试（或切换网络/IP）`,
+            `Bilibili 风控冷却中，请约 ${Math.ceil(remaining / 1000)} 秒后重试（或切换网络/IP）`,
         );
     };
 
+    // 给 UI 用：现在是不是在冷却、还要多久。provider 的 getAvailability 拿它去渲染提示，
+    // 免得用户只看到"加载不出来"却不知道是风控。
+    const getRiskControlState = () => {
+        if (riskControlUntil < 0) riskControlUntil = readPersistedCooldown();
+        const remaining = riskControlUntil - Date.now();
+        return { cooling: remaining > 0, remainingMs: Math.max(0, remaining) };
+    };
+
+    // 只读请求的并发闸门：最多 READ_CONCURRENCY 个同时在飞，超出的排队等一个空位。
+    const acquireReadSlot = async () => {
+        if (inFlightReads < READ_CONCURRENCY) {
+            inFlightReads += 1;
+            return;
+        }
+        await new Promise((resolve) => readWaiters.push(resolve));
+        inFlightReads += 1;
+    };
+
+    const releaseReadSlot = () => {
+        inFlightReads = Math.max(0, inFlightReads - 1);
+        const next = readWaiters.shift();
+        if (next) next();
+    };
+
     const tripRiskControl = (detail) => {
-        riskControlUntil = Date.now() + RISK_CONTROL_COOLDOWN_MS;
+        // 连续被拦才加长窗口：第一次 1 分钟，之后 2/4/8 分钟封顶。偶发抖动不该冻住整个音源。
+        riskControlStrike += 1;
+        const window = Math.min(
+            RISK_CONTROL_COOLDOWN_BASE_MS * 2 ** (riskControlStrike - 1),
+            RISK_CONTROL_COOLDOWN_MAX_MS,
+        );
+        riskControlUntil = Date.now() + window;
         try {
-            store.set(RISK_CONTROL_KEY, { until: riskControlUntil });
+            store.set(RISK_CONTROL_KEY, { until: riskControlUntil, strike: riskControlStrike });
         } catch (error) {
             logWarn('failed to persist risk-control state', error);
         }
         logWarn(
             `risk control triggered${detail ? `: ${detail}` : ''}; `
-            + `pausing requests for ${RISK_CONTROL_COOLDOWN_MS / 60000} min`,
+            + `pausing requests for ${Math.round(window / 1000)}s (strike ${riskControlStrike})`,
         );
         return new BilibiliRiskControlError(
             `Bilibili 风控拦截：请求过于频繁或当前网络/IP 被限制，已暂停请求 `
@@ -281,7 +337,7 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
                 headers: {
                     ...COMMON_HEADERS,
                     ...(options.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
-                    ...(cookieHeader() ? { Cookie: cookieHeader() } : {}),
+                    ...(options.omitCookie ? {} : (cookieHeader() ? { Cookie: cookieHeader() } : {})),
                 },
                 body: options.body,
                 signal: controller.signal,
@@ -319,31 +375,60 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
         }
     };
 
-    // Serialize + pace every API call. `finger` and passport traffic go through here too, so the
-    // device-fingerprint bootstrap can never race the request that triggered it.
-    const requestJson = (url, options = {}) => {
-        const run = async () => {
-            assertNotCoolingDown();
-            const gap = lastRequestAt + MIN_REQUEST_GAP_MS - Date.now();
-            if (gap > 0) await sleep(gap);
-            lastRequestAt = Date.now();
-            let lastError;
-            for (let attempt = 1; attempt <= REQUEST_MAX_ATTEMPTS; attempt += 1) {
-                try {
-                    return await requestJsonOnce(url, options);
-                } catch (error) {
-                    if (error?.isRiskControl) throw error; // never retry into a ban
-                    lastError = error;
-                    if (attempt < REQUEST_MAX_ATTEMPTS) {
-                        await sleep(400 * attempt + Math.floor(Math.random() * 200));
-                    }
+    // 出站节奏：无论串行还是并发，两次请求之间都留一个最小间隔。B站 限的是突发速率，
+    // 把间隔从 300ms 降到 70ms 并允许 3 路并发，列表加载的排队时间能砍掉大半。
+    const pace = async () => {
+        const gap = lastRequestAt + MIN_REQUEST_GAP_MS - Date.now();
+        if (gap > 0) await sleep(gap);
+        lastRequestAt = Date.now();
+    };
+
+    const attemptRequest = async (url, options) => {
+        await pace();
+        let lastError;
+        for (let attempt = 1; attempt <= REQUEST_MAX_ATTEMPTS; attempt += 1) {
+            try {
+                const result = await requestJsonOnce(url, options);
+                // 一次成功的业务请求说明风控状态已经恢复，下一次触发重新从 1 分钟起步。
+                riskControlStrike = 0;
+                return result;
+            } catch (error) {
+                if (error?.isRiskControl) throw error; // never retry into a ban
+                lastError = error;
+                if (attempt < REQUEST_MAX_ATTEMPTS) {
+                    await sleep(400 * attempt + Math.floor(Math.random() * 200));
                 }
             }
-            throw lastError;
-        };
-        const result = requestChain.then(run, run);
-        requestChain = result.then(() => undefined, () => undefined);
-        return result;
+        }
+        throw lastError;
+    };
+
+    const isSerializedUrl = (url) => SERIALIZED_PATH_PREFIXES.some(prefix => String(url).includes(prefix));
+
+    // Session-minting traffic (passport login, fingerprint bootstrap, ticket) stays strictly
+    // ordered; everything else runs through a small concurrency gate so a 1000-track wall no
+    // longer degrades into a 50-request queue.
+    const requestJson = (url, options = {}) => {
+        if (isSerializedUrl(url)) {
+            const run = async () => {
+                assertNotCoolingDown();
+                return attemptRequest(url, options);
+            };
+            const result = requestChain.then(run, run);
+            requestChain = result.then(() => undefined, () => undefined);
+            return result;
+        }
+
+        return (async () => {
+            assertNotCoolingDown();
+            await acquireReadSlot();
+            try {
+                assertNotCoolingDown();
+                return await attemptRequest(url, options);
+            } finally {
+                releaseReadSlot();
+            }
+        })();
     };
 
     const extractQrKeyFromUrl = (url) => {
@@ -368,6 +453,51 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
         if (body?.data?.b_4) setCookie('buvid4', body.data.b_4);
         persistSession();
         return { b3: body?.data?.b_3 || '', b4: body?.data?.b_4 || '' };
+    };
+
+    // Risk-control ticket. Endpoint and signing are public API facts
+    // (POST /bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket, HMAC-SHA256 over "ts"+timestamp);
+    // without it nav/playurl answer -412 noticeably more often.
+    const runBiliTicket = async () => {
+        const timestamp = Math.floor(Date.now() / 1000);
+        const hexsign = crypto.createHmac('sha256', BILI_TICKET_HMAC_KEY)
+            .update(`ts${timestamp}`)
+            .digest('hex');
+        const query = new URLSearchParams({
+            key_id: 'ec02',
+            hexsign,
+            'context[ts]': String(timestamp),
+            csrf: '',
+        });
+        const { body } = await requestJson(
+            `${API_BASE}/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket?${query.toString()}`,
+            { method: 'POST', body: new URLSearchParams({ csrf: '' }), omitCookie: true },
+        );
+        const ticket = String(body?.data?.ticket || '');
+        if (!ticket) throw new Error(`bili_ticket gen failed: ${body?.code} ${body?.message || ''}`);
+        setCookie('bili_ticket', ticket);
+        if (!session) session = { cookies: {}, refreshToken: '', wbi: null, mid: null, nickname: '' };
+        session.ticketExpiresAt = Date.now() + BILI_TICKET_TTL_MS;
+        persistSession();
+        return ticket;
+    };
+
+    // Ticket renewal is best-effort: a failure must never take the whole provider down, it just
+    // leaves us on the (slightly more challenge-prone) anonymous path.
+    let ticketBootstrap = null;
+    let ticketAttemptAt = 0;
+    const ensureBiliTicket = async () => {
+        const expiresAt = Number(session?.ticketExpiresAt || 0);
+        // 提前一小时续期；没到点就复用，避免每个业务请求都去换票。
+        if (session?.cookies?.bili_ticket && expiresAt - Date.now() > 60 * 60 * 1000) return;
+        if (ticketAttemptAt && Date.now() - ticketAttemptAt < FINGERPRINT_RETRY_BACKOFF_MS) return;
+        if (!ticketBootstrap) {
+            ticketAttemptAt = Date.now();
+            ticketBootstrap = runBiliTicket()
+                .catch((error) => { logWarn('bili_ticket bootstrap failed', error); })
+                .finally(() => { ticketBootstrap = null; });
+        }
+        return ticketBootstrap;
     };
 
     // Passport endpoints are the exception: they mint the session, so they run before buvid exists.
@@ -485,6 +615,18 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             return body.data;
         },
 
+        // 分页版收藏夹列表：list-all 是轻量接口不带 cover，网格里的文件夹封面全靠它。
+        // ps 上限 50（文档），超出的用 pn 翻。
+        fav_created_paged: async ({ mid, pn = 1, ps = 50 }) => {
+            const targetMid = Number(mid || session?.mid || 0);
+            if (!targetMid) throw new Error('fav_created_paged: no account mid (login first)');
+            const { body } = await requestJson(
+                `${API_BASE}/x/v3/fav/folder/created/list?up_mid=${targetMid}&pn=${Number(pn) || 1}&ps=${Math.min(Number(ps) || 50, 50)}&platform=web`,
+            );
+            if (body?.code !== 0) throw new Error(`fav created paged failed: ${body?.code} ${body?.message || ''}`);
+            return body.data;
+        },
+
         fav_collected: async ({ mid, pn = 1, ps = 20 }) => {
             const targetMid = Number(mid || session?.mid || 0);
             if (!targetMid) throw new Error('fav_collected: no account mid (login first)');
@@ -502,6 +644,29 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
                 `${API_BASE}/x/v3/fav/resource/list?media_id=${encodeURIComponent(targetMediaId)}&pn=${Number(pn) || 1}&ps=${Number(ps) || 20}&order=mtime&type=0&platform=web`,
             );
             if (body?.code !== 0) throw new Error(`fav resources failed: ${body?.code} ${body?.message || ''}`);
+            return body.data;
+        },
+
+        // 一次性拿到整个收藏夹的 id 列表（不受 ps<=20 限制）。列表页先用它拿到准确总数和
+        // 全部条目身份，再按显示需要分批补详情，比逐页 fav/resource/list 少得多请求。
+        fav_resource_ids: async ({ mediaId }) => {
+            const targetMediaId = String(mediaId || '').trim();
+            if (!targetMediaId) throw new Error('fav_resource_ids: missing mediaId');
+            const { body } = await requestJson(
+                `${API_BASE}/x/v3/fav/resource/ids?media_id=${encodeURIComponent(targetMediaId)}&platform=web`,
+            );
+            if (body?.code !== 0) throw new Error(`fav resource ids failed: ${body?.code} ${body?.message || ''}`);
+            return body.data;
+        },
+
+        // 按 id 批量补详情：resources 形如 "aid:2,auid:12"，一次最多 20 个。
+        fav_resource_infos: async ({ resources }) => {
+            const target = String(resources || '').trim();
+            if (!target) throw new Error('fav_resource_infos: missing resources');
+            const { body } = await requestJson(
+                `${API_BASE}/x/v3/fav/resource/infos?resources=${encodeURIComponent(target)}&platform=web`,
+            );
+            if (body?.code !== 0) throw new Error(`fav resource infos failed: ${body?.code} ${body?.message || ''}`);
             return body.data;
         },
 
@@ -576,6 +741,9 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
                 cid: firstPage?.cid ?? data.cid ?? 0,
                 title: data.title || '',
                 pic: data.pic || '',
+                // UP 主信息：renderer 侧拿不到原始响应，之前视频歌曲的歌手名只能显示占位串。
+                ownerMid: Number(data.owner?.mid) || 0,
+                ownerName: String(data.owner?.name || ''),
                 pages: Array.isArray(data.pages)
                     ? data.pages.map(page => ({ cid: page.cid, part: page.part, duration: page.duration }))
                     : [],
@@ -625,19 +793,25 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
                     timelengthMs: Number(body?.data?.timelength) || 0,
                 };
             }
+            const voucher = body?.data?.v_voucher;
             logWarn(
                 'playurl: no audio stream; '
-                + `v_voucher=${body?.data?.v_voucher ? 'present(risk-control)' : 'absent'} `
+                + `v_voucher=${voucher ? 'present(risk-control)' : 'absent'} `
                 + `hasDash=${Boolean(dash)} durlCount=${Array.isArray(body?.data?.durl) ? body.data.durl.length : 0} `
                 + `acceptQuality=${JSON.stringify(body?.data?.accept_quality || []).slice(0, 100)}`,
             );
-            throw new Error('playurl: no audio stream in dash or durl response');
+            const error = new Error(voucher
+                ? 'playurl: B站 要求验证码校验（v_voucher），请稍后在 B站 网页端完成一次验证后重试'
+                : 'playurl: no audio stream in dash or durl response');
+            // 让上层把这类和"歌曲真的没有音频流"区分开：前者是可以恢复的风控，后者是内容限制。
+            if (voucher) error.isVoucherChallenge = true;
+            throw error;
         },
     };
 
     const hasAuthenticatedCookies = () => {
         const cookies = session?.cookies || {};
-        return SESSION_COOKIE_KEYS.filter((key) => cookies[key]).length >= 3;
+        return AUTHENTICATION_COOKIE_KEYS.filter((key) => cookies[key]).length >= 3;
     };
 
     const pruneNonSessionCookies = () => {
@@ -652,8 +826,8 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
     return {
         getStatus() {
             const current = session || loadSession();
-            if (!current) return { configured: true, authenticated: false };
-            return { configured: true, authenticated: hasAuthenticatedCookies() };
+            if (!current) return { configured: true, authenticated: false, ...getRiskControlState() };
+            return { configured: true, authenticated: hasAuthenticatedCookies(), ...getRiskControlState() };
         },
 
         async request(operation, params = {}) {
@@ -662,7 +836,10 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             if (!handler) throw new Error(`Unknown bilibili operation: ${operation}`);
             // Bootstrap buvid3/buvid4 before the first API call so it does not look like a bot.
             if (operation !== 'finger' && !PASSPORT_OPERATIONS.has(operation)) {
+                // 冷却期连引导请求都不发：指纹和票据也是出站流量，撞上去只会把封禁拖更长。
+                assertNotCoolingDown();
                 await ensureDeviceFingerprint();
+                await ensureBiliTicket();
             }
             const result = await handler(params);
             // Keep the stored envelope focused on long-lived credentials; transient cookies are dropped.

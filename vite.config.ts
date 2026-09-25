@@ -233,7 +233,7 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg'],
         devOptions: {
-          enabled: true
+          enabled: false
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 5000000,
