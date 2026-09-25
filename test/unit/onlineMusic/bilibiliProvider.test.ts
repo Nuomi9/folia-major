@@ -164,6 +164,33 @@ describe('bilibiliProvider catalog', () => {
         expect(page.items.map(song => song.id)).toEqual(['bili-video-100']);
     });
 
+    it('normalizes search results: strips highlight tags, parses mm:ss duration', async () => {
+        requestMock.mockResolvedValue({
+            numResults: 42,
+            result: [
+                {
+                    type: 'video', aid: 777, bvid: 'BV777',
+                    title: '【4K】<em class="keyword">我好想你</em> - 苏打绿',
+                    author: '音乐私藏馆', mid: 9, duration: '5:01',
+                    pic: 'http://i0.hdslb.com/bfs/archive/777.jpg',
+                },
+                { type: 'live', title: '不相关的直播', duration: '123:45' },
+            ],
+        });
+
+        const page = await bilibiliProvider.search!.searchSongs('我好想你 苏打绿', 20, 0);
+
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0]).toMatchObject({
+            id: 'bili-video-777',
+            name: '【4K】我好想你 - 苏打绿',
+            artists: [{ id: '9', name: '音乐私藏馆' }],
+            durationMs: 301_000,
+            sourceRef: { mediaId: 'video:777', providerData: { bvid: 'BV777' } },
+        });
+        expect(page.total).toBe(42);
+    });
+
     it('advances paging by consumed ids even when dead entries drop out of infos', async () => {
         // 回归点：收藏夹里的失效稿件不会出现在 infos 响应里。若按"拿到的条目数"推进
         // nextOffset，offset 会和 ids 索引错位（重复拉、漏拉、提前收尾）。

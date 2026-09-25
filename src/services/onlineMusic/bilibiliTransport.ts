@@ -20,6 +20,9 @@ export type BilibiliOperation =
     | 'fav_resource_infos'
     | 'season_archives'
     | 'audio_song_info'
+    | 'search_video'
+    | 'fav_folder_add'
+    | 'fav_deal'
     | 'audio_url'
     | 'video_view'
     | 'video_playurl';

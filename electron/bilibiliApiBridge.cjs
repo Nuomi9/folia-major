@@ -362,7 +362,7 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
                     // 所以按风控信号处理：立即熔断，且不进入重试。
                     throw tripRiskControl(`non-JSON 200 (${contentType || 'unknown type'}) for ${url}`);
                 }
-                throw new Error(`Bilibili API returned non-JSON response (${status})`);
+                throw new Error(`Bilibili API returned non-JSON response (status=${status} type=${contentType})`);
             }
             const body = await response.json();
             // Bilibili also reports risk control inside a 200 body.
@@ -806,6 +806,57 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             // 让上层把这类和"歌曲真的没有音频流"区分开：前者是可以恢复的风控，后者是内容限制。
             if (voucher) error.isVoucherChallenge = true;
             throw error;
+        },
+
+        // 关键词搜视频稿件（wbi 签名）。result 原样交给 renderer 归一化。
+        // 搜索接口风控最敏感：依赖 buvid + bili_ticket + Cookie 齐全，节奏由桥内节流控制。
+        search_video: async ({ keyword, pn = 1, ps = 20 }) => {
+            const kw = String(keyword || '').trim();
+            if (!kw) throw new Error('search_video: missing keyword');
+            const params = signWbiParams(
+                { search_type: 'video', keyword: kw, pn: Number(pn) || 1, ps: Math.min(Number(ps) || 20, 50) },
+                session?.wbi,
+            );
+            const query = new URLSearchParams();
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined) query.set(key, String(value));
+            });
+            const url = `${API_BASE}/x/web-interface/wbi/search/type?${query.toString()}`;
+            try {
+                const { body } = await requestJson(url);
+                if (body?.code !== 0) throw new Error(`search failed: ${body?.code} ${body?.message || ''}`);
+                return body.data;
+            } catch (error) {
+                logWarn(`search_video failed | wbiReady=${Boolean(session?.wbi?.imgKey)} | url=${url.slice(0, 140)}`, error);
+                throw error;
+            }
+        },
+
+        // 新建自建收藏夹（写操作，csrf 必需）
+        fav_folder_add: async ({ title }) => {
+            const name = String(title || '').trim();
+            if (!name) throw new Error('fav_folder_add: missing title');
+            const csrf = session?.cookies?.bili_jct || '';
+            if (!csrf) throw new Error('fav_folder_add: not logged in');
+            const form = new URLSearchParams({ title: name, privacy: '0', csrf, csrf_token: csrf });
+            const { body } = await requestJson(`${API_BASE}/x/v3/fav/folder/add`, { method: 'POST', body: form });
+            if (body?.code !== 0) throw new Error(`fav folder add failed: ${body?.code} ${body?.message || ''}`);
+            return body.data;
+        },
+
+        // 把视频稿件收藏进指定收藏夹（favresource/deal 复合接口，type=2 视频稿件）
+        fav_deal: async ({ avid, addMediaIds, delMediaIds = '' }) => {
+            const rid = String(avid || '').trim();
+            const add = String(addMediaIds || '').trim();
+            if (!rid || !add) throw new Error('fav_deal: missing avid or addMediaIds');
+            const csrf = session?.cookies?.bili_jct || '';
+            if (!csrf) throw new Error('fav_deal: not logged in');
+            const form = new URLSearchParams({
+                rid, type: '2', add_media_ids: add, del_media_ids: delMediaIds, csrf,
+            });
+            const { body } = await requestJson(`${API_BASE}/x/v3/fav/resource/deal`, { method: 'POST', body: form });
+            if (body?.code !== 0) throw new Error(`fav deal failed: ${body?.code} ${body?.message || ''}`);
+            return body.data ?? { ok: true };
         },
     };
 

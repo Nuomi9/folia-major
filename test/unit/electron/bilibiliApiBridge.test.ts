@@ -256,7 +256,9 @@ describe('Bilibili API bridge risk control', () => {
         // buvid 已经落盘，重启后不该再探 finger；换票是另一条引导，不算重复探测指纹。
         expect(second.paths()).not.toContain(FINGER);
         expect(second.paths()).toContain(NAV);
-        expect(second.calls[0].headers.Cookie).toContain('buvid3=BUVID3-KEEP');
+        // 换票请求是匿名发出的（omitCookie），业务请求才携带 buvid
+        const navCall = second.calls.find(call => call.url.includes(NAV));
+        expect(navCall?.headers.Cookie).toContain('buvid3=BUVID3-KEEP');
     });
 });
 

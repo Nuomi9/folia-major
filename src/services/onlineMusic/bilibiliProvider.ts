@@ -649,6 +649,33 @@ const getPlaylistTracks = async (
     }
 };
 
+// 搜索结果归一化：B 站主搜索返回带 <em class="keyword"> 高亮标签的标题、'mm:ss' 时长字符串
+const stripHighlight = (title: string): string => String(title || '').replace(/<[^>]+>/g, '');
+
+const parseDurationText = (text: string): number => {
+    const parts = String(text || '').split(':').map(Number).reverse();
+    return (parts[0] || 0) + (parts[1] || 0) * 60 + (parts[2] || 0) * 3600;
+};
+
+const normalizeSearchVideo = (item: any): UnifiedSong | null => {
+    const bvid = String(item?.bvid || '');
+    const avid = String(item?.aid || '');
+    if (!bvid && !avid) return null;
+    return {
+        id: `bili-video-${avid}`,
+        name: stripHighlight(item?.title),
+        artists: [{ id: String(item?.mid ?? ''), name: String(item?.author || '未知上传者') }],
+        album: { id: '', name: '', ...(item?.pic ? { coverUrl: toHttpsImageUrl(item.pic) } : {}) },
+        durationMs: parseDurationText(item?.duration) * 1000,
+        sourceRef: {
+            kind: 'online',
+            providerId: 'bilibili',
+            mediaId: `video:${avid}`,
+            providerData: { kind: 'video', favType: 2, avid, ...(bvid ? { bvid } : {}) },
+        },
+    };
+};
+
 export const bilibiliProvider: OnlineMusicProvider = {
     id: 'bilibili',
     displayName: 'Bilibili',
@@ -660,7 +687,7 @@ export const bilibiliProvider: OnlineMusicProvider = {
             : { configured: false, reason: availability.reason === 'runtime-unavailable' ? 'runtime-unavailable' : 'not-configured' };
     },
     capabilities: {
-        search: false,
+        search: true,
         playback: true,
         lyrics: true,
         auth: true,
@@ -691,6 +718,23 @@ export const bilibiliProvider: OnlineMusicProvider = {
             return getAudioSource(song, quality);
         },
         getAvailability: () => ({ state: 'playable' as const }),
+    },
+    search: {
+        async searchSongs(keyword: string, limit = 20, offset = 0): Promise<ProviderPage<UnifiedSong>> {
+            const size = Math.min(Math.max(1, limit), 50);
+            const pn = Math.floor(Math.max(0, offset) / size) + 1;
+            const data = await requestBilibili<any>('search_video', { keyword, pn, ps: size });
+            const items = (Array.isArray(data?.result) ? data.result : [])
+                .map(normalizeSearchVideo)
+                .filter((song): song is UnifiedSong => song !== null);
+            const total = Number(data?.numResults) || items.length;
+            return {
+                items,
+                total,
+                hasMore: offset + items.length < total,
+                nextOffset: offset + items.length,
+            };
+        },
     },
     lyrics: {
         getLyrics: getLyricsWithNeteaseFallback,
