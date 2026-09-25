@@ -316,7 +316,7 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
         );
         return new BilibiliRiskControlError(
             `Bilibili 风控拦截：请求过于频繁或当前网络/IP 被限制，已暂停请求 `
-            + `${RISK_CONTROL_COOLDOWN_MS / 60000} 分钟，请稍后再试（或切换网络/IP）`,
+            + `${Math.round(window / 60000)} 分钟，请稍后再试（或切换网络/IP）`,
         );
     };
 

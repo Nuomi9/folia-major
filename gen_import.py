@@ -5,7 +5,8 @@ import json, re, sys
 
 raw = sys.argv[1]
 folder_name = sys.argv[2]
-limit = int(sys.argv[3]) if len(sys.argv) > 3 else 5
+limit = int(sys.argv[3]) if len(sys.argv) > 3 else 10000
+only = sys.argv[4] if len(sys.argv) > 4 else ''
 m = re.search(r'[?&]id=(\d+)', raw) or re.search(r'^(\d+)$', raw.strip())
 assert m, f'无法从 {raw!r} 解析歌单 id'
 pid = m.group(1)
@@ -14,6 +15,7 @@ js = """(async () => {
     const PLAYLIST_ID = '__PID__';
     const FOLDER_NAME = '__FOLDER__';
     const LIMIT = __LIMIT__;
+    const ONLY = '__ONLY__';
     const THRESHOLD = 0.55;
 
     const clean = (s) => String(s || '').toLowerCase()
@@ -45,6 +47,18 @@ js = """(async () => {
     };
 
     const { omni } = await import('/src/services/onlineMusic/omni.ts');
+    // 启动时若仍在风控冷却，先等它结束（最多 5 分钟），否则第一发就白打
+    {
+        const bp = await import('/src/services/onlineMusic/bilibiliProvider.ts');
+        await bp.refreshBilibiliRiskControlState();
+        let guard = 0;
+        while (bp.getBilibiliRiskControlState().cooling && guard < 30) {
+            console.log(`[import] risk-control cooling, waiting... (${bp.getBilibiliRiskControlState().remainingMs}ms)`);
+            await new Promise(r => setTimeout(r, 10000));
+            await bp.refreshBilibiliRiskControlState();
+            guard += 1;
+        }
+    }
     const { bilibiliProvider } = await import('/src/services/onlineMusic/bilibiliProvider.ts');
     const { requestBilibili } = await import('/src/services/onlineMusic/bilibiliTransport.ts');
     const p = bilibiliProvider;
@@ -63,7 +77,8 @@ js = """(async () => {
         offset += items.length;
         if (!page.hasMore) break;
     }
-    const picked = songs.slice(0, LIMIT);
+    const onlySet = ONLY ? new Set(ONLY.split('||')) : null;
+    const picked = songs.filter(s => !onlySet || onlySet.has(s.name)).slice(0, LIMIT);
     if (!picked.length) return JSON.stringify({ error: 'playlist empty or not found', playlistId: PLAYLIST_ID });
 
     // 2) 目标收藏夹：同名复用，否则新建
@@ -79,24 +94,37 @@ js = """(async () => {
     const matched = [], unmatched = [], failed = [];
     for (const song of picked) {
         const query = [song.name, song.artists?.[0]?.name].filter(Boolean).join(' ');
-        try {
-            const res = await p.search.searchSongs(query, 10, 0);
-            let best = null, bestScore = 0;
-            for (const cand of res.items) {
-                const sc = score(cand, song);
-                if (sc > bestScore) { bestScore = sc; best = cand; }
+        let done = false;
+        for (let attempt = 0; attempt < 3 && !done; attempt++) {
+            try {
+                const res = await p.search.searchSongs(query, 10, 0);
+                let best = null, bestScore = 0;
+                for (const cand of res.items) {
+                    const sc = score(cand, song);
+                    if (sc > bestScore) { bestScore = sc; best = cand; }
+                }
+                if (!best || bestScore < THRESHOLD) {
+                    unmatched.push({ name: song.name, artist: song.artists?.[0]?.name, bestScore: +bestScore.toFixed(2), bestTitle: best?.name || null });
+                    done = true;
+                    break;
+                }
+                const avid = String(best.sourceRef?.providerData?.avid || '');
+                await requestBilibili('fav_deal', { avid, addMediaIds: folderId });
+                matched.push({ name: song.name, artist: song.artists?.[0]?.name, score: +bestScore.toFixed(2), bili: best.name, bvid: best.sourceRef?.providerData?.bvid });
+                done = true;
+            } catch (e) {
+                const msg = String(e && e.message || e);
+                if (/风控|RiskControl/.test(msg) && attempt < 2) {
+                    // 搜索风控冷却：等 80 秒再重试同一首
+                    await new Promise(r => setTimeout(r, 80000));
+                    continue;
+                }
+                failed.push({ name: song.name, error: msg.slice(0, 400) });
+                done = true;
             }
-            if (!best || bestScore < THRESHOLD) {
-                unmatched.push({ name: song.name, artist: song.artists?.[0]?.name, bestScore: +bestScore.toFixed(2), bestTitle: best?.name || null });
-                continue;
-            }
-            const avid = String(best.sourceRef?.providerData?.avid || '');
-            await requestBilibili('fav_deal', { avid, addMediaIds: folderId });
-            matched.push({ name: song.name, artist: song.artists?.[0]?.name, score: +bestScore.toFixed(2), bili: best.name, bvid: best.sourceRef?.providerData?.bvid });
-        } catch (e) {
-            failed.push({ name: song.name, error: String(e && e.message || e).slice(0, 400) });
         }
-        await new Promise(r => setTimeout(r, 400));
+        if (!done) failed.push({ name: song.name, error: 'exhausted retries' });
+        await new Promise(r => setTimeout(r, 1200));
     }
     return JSON.stringify({
         folderId, folderName: FOLDER_NAME,
@@ -105,6 +133,6 @@ js = """(async () => {
     });
 })()
 """
-js = js.replace('__PID__', pid).replace('__FOLDER__', folder_name).replace('__LIMIT__', str(limit))
+js = js.replace('__PID__', pid).replace('__FOLDER__', folder_name).replace('__LIMIT__', str(limit)).replace("__ONLY__", only.replace("'", ''))
 open('import_run.js', 'w', encoding='utf-8').write(js)
 print(f'generated import_run.js | playlist={pid} folder={folder_name!r} limit={limit}')
