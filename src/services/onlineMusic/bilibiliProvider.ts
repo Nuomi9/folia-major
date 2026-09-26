@@ -699,6 +699,7 @@ export const bilibiliProvider: OnlineMusicProvider = {
         artists: false,
         recommendations: false,
         mutations: true,
+        playlistTrackMutations: true,
         wordByWordLyrics: false,
     },
     normalizeSong: () => {
