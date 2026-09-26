@@ -22,7 +22,7 @@ const send = (method, params = {}) => new Promise((resolve, reject) => {
     pending.set(mid, { resolve, reject });
     ws.send(JSON.stringify({ id: mid, method, params }));
 });
-const timeout = setTimeout(() => { console.error('TIMEOUT_120s'); process.exit(2); }, 120_000);
+const timeout = setTimeout(() => { console.error('TIMEOUT_30m'); process.exit(2); }, 30 * 60_000);
 
 ws.on('message', (raw) => {
     const msg = JSON.parse(raw);
