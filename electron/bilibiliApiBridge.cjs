@@ -848,12 +848,13 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
         fav_deal: async ({ avid, addMediaIds, delMediaIds = '' }) => {
             const rid = String(avid || '').trim();
             const add = String(addMediaIds || '').trim();
-            if (!rid || !add) throw new Error('fav_deal: missing avid or addMediaIds');
+            const del = String(delMediaIds || '').trim();
+            if (!rid || (!add && !del)) throw new Error('fav_deal: missing avid or add/del media ids');
             const csrf = session?.cookies?.bili_jct || '';
             if (!csrf) throw new Error('fav_deal: not logged in');
-            const form = new URLSearchParams({
-                rid, type: '2', add_media_ids: add, del_media_ids: delMediaIds, csrf,
-            });
+            const form = new URLSearchParams({ rid, type: '2', csrf });
+            if (add) form.set('add_media_ids', add);
+            if (del) form.set('del_media_ids', del);
             const { body } = await requestJson(`${API_BASE}/x/v3/fav/resource/deal`, { method: 'POST', body: form });
             if (body?.code !== 0) throw new Error(`fav deal failed: ${body?.code} ${body?.message || ''}`);
             return body.data ?? { ok: true };

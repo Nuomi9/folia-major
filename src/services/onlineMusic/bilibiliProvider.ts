@@ -172,7 +172,7 @@ const normalizeFavMediaSong = (media: any): UnifiedSong | null => {
     };
 };
 
-const normalizeFavFolder = (folder: any): ProviderCollection | null => {
+const normalizeFavFolder = (folder: any, owned?: boolean): ProviderCollection | null => {
     const id = folder?.id ?? folder?.fid;
     if (id === undefined || id === null || id === '') return null;
     const favType = Number(folder?.type) || 0;
@@ -193,6 +193,7 @@ const normalizeFavFolder = (folder: any): ProviderCollection | null => {
             favType,
             ownerMid,
             ownerName,
+            ...(owned === undefined ? {} : { owned }),
         },
     };
 };
@@ -473,8 +474,9 @@ const getUserPlaylists = async (
 
     const collections = [
         // created/list 的条目顶层没有 mid（UP 主在 upper 里），补上让 isOwned 语义不变。
-        ...createdList.map(entry => normalizeFavFolder({ ...entry, mid: entry?.upper?.mid ?? entry?.mid })),
-        ...collectedList.map(normalizeFavFolder),
+        // owned 标记驱动 mutations.canAddToPlaylist：B 站只允许往自己创建的夹子里加歌。
+        ...createdList.map((entry: any) => normalizeFavFolder({ ...entry, mid: entry?.upper?.mid ?? entry?.mid }, true)),
+        ...collectedList.map((entry: any) => normalizeFavFolder(entry, false)),
     ].filter((collection): collection is ProviderCollection => collection !== null);
     // 这是一次真实的收藏夹刷新，之前缓存的条目身份不再可信。
     clearBilibiliFavIdsCache();
@@ -620,7 +622,7 @@ const getPlaylistTracks = async (
         const songs: UnifiedSong[] = [];
         const results = await Promise.all(batches.map(async (batch) => {
             const data = await requestBilibili<any>('fav_resource_infos', {
-                resources: batch.map(entry => `${entry.id}:${entry.type}`).join(','),
+                resources: batch.map((entry: { id: string; type: number }) => `${entry.id}:${entry.type}`).join(','),
             });
             const infos: any[] = Array.isArray(data) ? data : [];
             return infos
@@ -696,7 +698,7 @@ export const bilibiliProvider: OnlineMusicProvider = {
         albums: false,
         artists: false,
         recommendations: false,
-        mutations: false,
+        mutations: true,
         wordByWordLyrics: false,
     },
     normalizeSong: () => {
@@ -724,7 +726,8 @@ export const bilibiliProvider: OnlineMusicProvider = {
             const size = Math.min(Math.max(1, limit), 50);
             const pn = Math.floor(Math.max(0, offset) / size) + 1;
             const data = await requestBilibili<any>('search_video', { keyword, pn, ps: size });
-            const items = (Array.isArray(data?.result) ? data.result : [])
+            const rawResults: any[] = Array.isArray(data?.result) ? data.result : [];
+            const items = rawResults
                 .map(normalizeSearchVideo)
                 .filter((song): song is UnifiedSong => song !== null);
             const total = Number(data?.numResults) || items.length;
@@ -756,5 +759,33 @@ export const bilibiliProvider: OnlineMusicProvider = {
         checkQr,
         cancelQr,
         getQrTtlMs: () => QR_TTL_MS,
+    },
+    mutations: {
+        // B 站只允许操作自己创建的收藏夹（订阅来的夹子/合集只读）
+        canAddToPlaylist: (playlist) => {
+            const data = playlist.providerData as Record<string, JsonValue> | undefined;
+            if (Number(data?.favType) === SEASON_FAV_TYPE) return false;
+            return data?.owned === true;
+        },
+        async updatePlaylistTracks(operation, playlist, tracks) {
+            const folderId = String(typeof playlist === 'object' ? playlist.id : playlist);
+            for (const track of tracks) {
+                const identity = typeof track === 'object'
+                    ? mediaIdentityOfSong(track)
+                    : parseMediaIdentity(track);
+                // 音频区（auid）的收藏走另一套接口，尚未实现；明确报错而不是静默跳过
+                if (!identity || identity.kind !== 'video') {
+                    throw new OnlineProviderError(
+                        'unsupported',
+                        `Bilibili fav mutation supports video entries only: ${String(track)}`,
+                        'bilibili',
+                    );
+                }
+                const payload = operation === 'add'
+                    ? { avid: identity.rawId, addMediaIds: folderId }
+                    : { avid: identity.rawId, delMediaIds: folderId };
+                await requestBilibili('fav_deal', payload);
+            }
+        },
     },
 };

@@ -1110,6 +1110,7 @@ export default {
     "lyricMatchPriorityDesc": "Saat beberapa sumber lirik memiliki kecocokan berkualitas tinggi, utamakan sumber ini terlebih dahulu."
   },
   "options": {
+    "bilibiliImport": "Bilibili playlist import",
     "refresh": "Segarkan",
     "cacheDetails": "Detail Cache",
     "settingsGroupAppearance": "Tampilan",

@@ -4252,7 +4252,7 @@ function isElectronDevRuntime() {
 
 function loadAppEntry(win, query = {}) {
   if (isElectronDevRuntime()) {
-    const url = new URL('http://localhost:3000');
+    const url = new URL('http://localhost:3001');
     Object.entries(query).forEach(([key, value]) => {
       url.searchParams.set(key, String(value));
     });

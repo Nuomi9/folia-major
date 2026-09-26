@@ -44,6 +44,7 @@ export const SETTINGS_ANCHOR_DEFINITIONS = {
     lyricApi: { section: 'integration', labelKey: 'options.lyricApi', electronOnly: true },
     stageMode: { section: 'integration', labelKey: 'options.stageMode' },
     navidrome: { section: 'integration', labelKey: 'navidrome.settings' },
+    bilibiliImport: { section: 'integration', labelKey: 'options.bilibiliImport' },
 
     // StorageSettingsSection (LocalLibraryWatchSection renders inside it)
     cacheDetails: { section: 'storage', labelKey: 'options.cacheDetails' },

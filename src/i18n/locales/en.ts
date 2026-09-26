@@ -1115,6 +1115,7 @@ export default {
     "lyricMatchPriorityDesc": "When multiple lyric sources have high-confidence matches, prefer this source first."
   },
   "options": {
+    "bilibiliImport": "Bilibili playlist import",
     "refresh": "Refresh",
     "cacheDetails": "Cache Details",
     "settingsGroupAppearance": "Appearance",

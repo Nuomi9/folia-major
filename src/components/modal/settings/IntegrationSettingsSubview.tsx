@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import BilibiliPlaylistImportSection from './BilibiliPlaylistImportSection';
 import { Activity, AlertCircle, Check, Loader2, Server, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
@@ -852,6 +853,7 @@ const IntegrationSettingsSubview: React.FC<IntegrationSettingsSubviewProps> = ({
                     )}
                 </div>
             </SettingsAnchor>
+            <BilibiliPlaylistImportSection />
         </>
     );
 };

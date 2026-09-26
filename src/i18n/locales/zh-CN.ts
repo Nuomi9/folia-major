@@ -1114,6 +1114,7 @@ export default {
     "lyricMatchPriorityDesc": "在多个歌词源都存在高置信度匹配时，优先选择该歌词源的结果。"
   },
   "options": {
+    "bilibiliImport": "B 站歌单导入",
     "refresh": "刷新",
     "cacheDetails": "缓存详情",
     "settingsGroupAppearance": "外观",
