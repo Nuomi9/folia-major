@@ -240,6 +240,7 @@
     "koffi": "^3.3.1",
     "kugoumusicapi": "https://github.com/MakcRe/KuGouMusicApi/archive/refs/tags/v1.6.0.tar.gz",
     "music-metadata": "^11.16.1",
+    "qrcode": "^1.5.4",
     "ws": "^8.21.3",
     "youtubei.js": "18.1.0"
   },
@@ -256,6 +257,7 @@
     "@tailwindcss/postcss": "^4.3.3",
     "@types/blueimp-md5": "^2.18.2",
     "@types/node": "^26.6.2",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@types/three": "^0.185.4",

@@ -1411,6 +1411,8 @@ export default {
     "loginNote": "Open Netease Music App > Discover > Scan QR",
     "loginTitleKugou": "Scan with KuGou Music",
     "loginNoteKugou": "Open KuGou Music and scan this QR code",
+    "loginTitleBilibili": "Scan with Bilibili",
+    "loginNoteBilibili": "Open the Bilibili app > Me > Scan",
     "loginTitleQq": "Scan to sign in to QQ Music",
     "loginTitleBodian": "Scan with Bodian Music",
     "loginNoteBodian": "Scan this code with the Bodian Music app and confirm sign-in",

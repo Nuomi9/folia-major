@@ -29,6 +29,9 @@ export interface PlatformNamePlace {
 }
 
 export const PLATFORM_NAME_PLACES: Record<string, PlatformNamePlace> = {
+    // The bilibili adapter's lyric fallback borrows a NetEase match (and probes the other
+    // platforms' word-by-word matchers through autoMatchBestLyric), so it names them by id.
+    'src/services/onlineMusic/bilibiliProvider.ts': { n: { netease: 14, qq: 1, kugou: 1 }, kind: 'question', why: 'the borrowed-lyrics fallback: a NetEase search for the same song, then the shared word-by-word probe over the platforms that have one' },
     'api-ts/lyric-proxy.ts': { n: { qq: 2, kugou: 1 }, kind: 'main', why: 'the hosts the lyric relay may reach' },
     'api-ts/qq.ts': { n: { qq: 10 }, kind: 'main', why: 'the serverless entry of the QQ backend; the host finds it by path' },
     'api/lyric-proxy.js': { n: { qq: 2, kugou: 1 }, kind: 'main', why: 'the built copy of api-ts/lyric-proxy.ts' },
@@ -58,7 +61,7 @@ export const PLATFORM_NAME_PLACES: Record<string, PlatformNamePlace> = {
     'src/components/modal/LocalSongMetadataMatchDialog.tsx': { n: { netease: 4, qq: 3, kugou: 2 }, kind: 'lyric', why: 'the metadata dialog\'s own list of sources' },
     'src/components/modal/lyric-match/LocalSongLyricMatch.tsx': { n: { netease: 1 }, kind: 'lyric' },
     'src/components/modal/lyric-match/navidromeSongMatch.ts': { n: { netease: 1 }, kind: 'lyric' },
-    'src/components/modal/newFeaturesRelease.ts': { n: { qq: 1 }, kind: 'stored', why: 'the id of a release note entry, also its i18n key; raised by the upstream merge 2026-10-17' },
+    'src/components/modal/newFeaturesRelease.ts': { n: { qq: 1, spotify: 1, ytm: 1 }, kind: 'stored', why: 'the ids of release note entries, also their i18n keys; raised by the upstream merge 2026-10-17' },
     'src/components/modal/settings/pages/HelpPage.tsx': { n: { qq: 5 }, kind: 'namesake', why: 'the QQ chat app\'s community group, not QQ Music: its number and its i18n key' },
     'src/components/modal/settings/pages/IntegrationPage.tsx': { n: { netease: 4 }, kind: 'stored', why: 'the stored setting neteaseScrobbleEnabled and its i18n keys' },
     'src/components/modal/settings/pages/LyricsPage.tsx': { n: { spotify: 1 }, kind: 'lyric', why: 'which of two hand-written descriptions of the lyric sources is shown' },

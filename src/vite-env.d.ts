@@ -230,6 +230,13 @@ declare global {
     updatedAt: number;
   }
 
+  // The Bilibili bridge keeps its own cookie jar in the main process; `configured` only says the
+  // desktop transport is there, `authenticated` whether a signed-in session is kept.
+  interface ElectronBilibiliApiStatus {
+    configured: boolean;
+    authenticated: boolean;
+  }
+
   interface ElectronKugouApiStatus {
     available: boolean;
     authenticated: boolean;
@@ -902,6 +909,11 @@ declare global {
       kugouRequest: (
         operation: ElectronKugouOperation,
         params?: Record<string, string | number | boolean | undefined>,
+      ) => Promise<unknown>;
+      getBilibiliApiStatus: () => Promise<ElectronBilibiliApiStatus>;
+      bilibiliRequest: (
+        operation: import('./services/onlineMusic/bilibiliTransport').BilibiliOperation,
+        params?: import('./services/onlineMusic/bilibiliTransport').BilibiliParams,
       ) => Promise<unknown>;
       getQqPort: () => Promise<number | null>;
       getQqApiStatus: () => Promise<ElectronQqApiStatus>;

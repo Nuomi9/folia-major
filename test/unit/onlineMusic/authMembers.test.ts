@@ -32,6 +32,12 @@ const AUTH_MEMBERS: Record<string, string[]> = {
         'cancelLogin', 'checkLogin', 'describeLoginFailure', 'getLoginStatus', 'getLoginTexts', 'getLoginTtlMs', 'logout', 'openLoginPage',
         'opensLoginPageItself', 'signInRanOut', 'startLogin',
     ],
+    // Bilibili's session lives in the main process, so there is nothing to drop in the renderer at a
+    // sign-out beyond the bridge call; the account kept on disk may be shown at once at app start.
+    bilibili: [
+        'cancelLogin', 'checkLogin', 'createQr', 'getLoginStatus', 'getLoginTexts', 'getLoginTtlMs', 'logout', 'showsKeptAccountAtStart',
+        'startLogin',
+    ],
 };
 
 describe('the sign-in members of each built-in platform', () => {

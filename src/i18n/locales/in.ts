@@ -1411,6 +1411,8 @@ export default {
     "loginNote": "Buka Aplikasi Netease Music > Discover > Pindai QR",
     "loginTitleKugou": "Pindai dengan KuGou Music",
     "loginNoteKugou": "Buka KuGou Music dan pindai kode QR ini",
+    "loginTitleBilibili": "Pindai dengan Bilibili",
+    "loginNoteBilibili": "Buka aplikasi Bilibili > Saya > Pindai",
     "loginTitleQq": "Pindai untuk masuk ke QQ Music",
     "loginTitleBodian": "Pindai dengan Bodian Music",
     "loginNoteBodian": "Pindai kode ini dengan aplikasi Bodian Music dan konfirmasi masuk",

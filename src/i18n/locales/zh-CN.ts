@@ -1411,6 +1411,8 @@ export default {
     "loginNote": "打开网易云音乐APP > 发现 > 扫一扫",
     "loginTitleKugou": "使用酷狗音乐APP扫码",
     "loginNoteKugou": "打开酷狗音乐APP扫描二维码",
+    "loginTitleBilibili": "使用哔哩哔哩APP扫码",
+    "loginNoteBilibili": "打开哔哩哔哩APP > 我的 > 扫一扫",
     "loginTitleQq": "扫码登录QQ音乐",
     "loginTitleBodian": "使用波点音乐 App 扫码",
     "loginNoteBodian": "打开波点音乐 App 扫描二维码并确认登录",

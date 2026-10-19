@@ -44,6 +44,8 @@ const {
   describeWallpaperDisplays,
 } = require('./wallpaper/wallpaperDisplay.cjs');
 const { createKugouApiBridge } = require('./kugou/kugouApiBridge.cjs');
+const { createBilibiliApiBridge } = require('./bilibiliApiBridge.cjs');
+const { createBilibiliMediaProxy } = require('./bilibiliMediaProxy.cjs');
 const { createExternalUrlOpener } = require('./externalUrlPolicy.cjs');
 const { createSenderGuardedHandler } = require('./ipcAccessGuard.cjs');
 const { createBodianApiBridge } = require('./bodian/bodianApiBridge.cjs');
@@ -123,6 +125,16 @@ protocol.registerSchemesAsPrivileged([
   },
   {
     scheme: TRANSCODE_PROTOCOL_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+  {
+    scheme: 'folia-bili',
     privileges: {
       standard: true,
       secure: true,
@@ -229,6 +241,15 @@ const transcodeService = createTranscodeService({
 // KuGou credentials stay inside the main process and are encrypted lazily after Electron is ready.
 // The bridge refuses Linux's plaintext `basic_text` fallback and degrades to an in-memory session.
 const kugouApiBridge = createKugouApiBridge({ store, safeStorage });
+// Bilibili: the bridge owns its own cookie jar and talks through Chromium's network stack, so the
+// API traffic carries a browser-like TLS/HTTP2 fingerprint (the WAF challenges Node's undici far
+// more often). The media proxy rewrites Referer for the CDN, which refuses the renderer otherwise.
+const bilibiliApiBridge = createBilibiliApiBridge({
+  store,
+  safeStorage,
+  netFetch: (url, init) => electronNet.fetch(url, init),
+});
+const bilibiliMediaProxy = createBilibiliMediaProxy({});
 const bodianMediaPolicy = createBodianMediaPolicy();
 const bodianApiBridge = createBodianApiBridge({ store, safeStorage,
   onAudioSource: url => bodianMediaPolicy.register(url),
@@ -5599,6 +5620,9 @@ app.whenReady().then(async () => {
   setupVideoExportDisplayMediaHandler();
   setupCorsBypassHandlers();
   localCoverAssetStore.registerProtocolHandler(protocol, electronNet);
+  // Bilibili's CDN refuses a request whose Referer is not bilibili.com, which the renderer can never
+  // send: the proxy re-signs Referer/UA and forwards Range so seeking keeps working.
+  bilibiliMediaProxy.registerProtocolHandler(protocol, electronNet);
   protocol.handle(YTM_AUDIO_SCHEME, request => ytmApiBridge.handleAudioRequest(request));
   protocol.handle(SPOTIFY_AUDIO_SCHEME, request => spotifyApiBridge.handleAudioRequest(request));
   // Transcode fallback is an optional degradation path; a failure preparing it must never keep
@@ -6493,6 +6517,19 @@ ipcMain.handle('kugou-api-request', createSenderGuardedHandler({
   channel: 'kugou-api-request',
   isTrusted: isFirstPartyWindowContents,
   handler: (_event, operation, params) => kugouApiBridge.request(operation, params),
+}));
+ipcMain.handle('bilibili-api-status', createSenderGuardedHandler({
+  channel: 'bilibili-api-status',
+  // Same shape as the other bridges: a refused caller gets "no such capability", so the renderer
+  // falls into its unavailable branch instead of throwing.
+  isTrusted: isFirstPartyWindowContents,
+  onUntrusted: () => null,
+  handler: () => bilibiliApiBridge.getStatus(),
+}));
+ipcMain.handle('bilibili-api-request', createSenderGuardedHandler({
+  channel: 'bilibili-api-request',
+  isTrusted: isFirstPartyWindowContents,
+  handler: (_event, operation, params) => bilibiliApiBridge.request(operation, params),
 }));
 ipcMain.handle('bodian-api-request', (event, operation, params) => {
   if (!isTrustedMainWindowContents(event.sender)) {
