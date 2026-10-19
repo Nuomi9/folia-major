@@ -46,6 +46,25 @@ export const isStagePlaybackSong = (song: SongResult | null | undefined): boolea
     return Boolean(song && (song.sourceRef?.kind === 'stage' || (song as any).isStage === true));
 };
 
+/**
+ * The provider a song belongs to, read off its id when `sourceRef` is missing.
+ *
+ * Every path that rebuilds a song object by hand (queue entries, restored sessions, grid cards)
+ * can lose `sourceRef`, and the old fallback here was a hard-coded `netease`. For a Bilibili
+ * track that silently retargeted everything keyed by source - lyric overrides above all, so a
+ * hand-picked lyric stopped being found and the automatic match took its place again on the
+ * next play. The id prefixes are the provider's own (`bili-video-<avid>`, `bili-audio-<sid>`),
+ * so reading them back is exact rather than a guess.
+ */
+const inferOnlineSourceRef = (songId: unknown): PlaybackSourceRef | null => {
+    const id = String(songId ?? '');
+    const bilibili = /^bili-(video|audio)-(.+)$/.exec(id);
+    if (bilibili) {
+        return { kind: 'online', providerId: 'bilibili', mediaId: `${bilibili[1]}:${bilibili[2]}` };
+    }
+    return null;
+};
+
 export const getPlaybackSourceRef = (song: SongResult): PlaybackSourceRef => {
     if (song.sourceRef) return song.sourceRef;
     if (isStagePlaybackSong(song)) return { kind: 'stage', mediaId: String(song.id) };
@@ -53,6 +72,11 @@ export const getPlaybackSourceRef = (song: SongResult): PlaybackSourceRef => {
     if (isNavidromePlaybackSong(song)) {
         const carrier = resolveNavidromePlaybackCarrier(song);
         return { kind: 'navidrome', mediaId: String(carrier?.navidromeData.id || song.id) };
+    }
+    const inferred = inferOnlineSourceRef(song.id);
+    if (inferred && inferred.kind === 'online') {
+        const isCloudVariant = song.sourceType === 'cloud' || song.t === 1 || song.t === 2;
+        return isCloudVariant ? { ...inferred, variant: 'cloud' as const } : inferred;
     }
     const isLegacyCloudSong = song.sourceType === 'cloud' || song.t === 1 || song.t === 2;
     const providerId: OnlineProviderId = (song as any).providerId || 'netease';

@@ -10,7 +10,7 @@ import { migrateLyricDataRenderHints } from '../utils/lyrics/renderHints';
 import { isPureMusicLyricText } from '../utils/lyrics/pureMusic';
 import { autoMatchBestLyric } from '../utils/lyrics/autoMatchBestLyric';
 import { getPlatformLyricSource } from '../utils/lyrics/lyricSources';
-import { loadOnlineLyricsState, markOnlineLyricsPureMusic, resolveOnlineLyrics, saveOnlineLyricsState } from '../utils/onlineLyricsState';
+import { loadOnlineLyricsState, markOnlineLyricsPureMusic, resolveOnlineLyrics, saveAutoMatchedOnlineLyricsState, saveOnlineLyricsState } from '../utils/onlineLyricsState';
 import type { AudioQualityPreference, MediaId } from '../types/onlineMusic';
 import { getPlaybackSourceRef } from '../utils/appPlaybackGuards';
 import { nextTransitionSong, queueIndexOf } from '../utils/playbackNeighbors';
@@ -357,8 +357,10 @@ const prefetchSong = async (
                                 matchedLyricsSource: bestMatch.source,
                                 matchedLyricsProviderPlatform: bestMatch.matchedLyricsProviderPlatform,
                             };
-                            await saveOnlineLyricsState(song, overrideState);
-                            finalLyrics = bestMatch.lyrics;
+                            // Guarded: the listener may have picked a lyric while this search ran.
+                            if (await saveAutoMatchedOnlineLyricsState(song, overrideState)) {
+                                finalLyrics = bestMatch.lyrics;
+                            }
                         } else if (bestMatch?.isPureMusic) {
                             // Same discriminator fix as in onlinePlayback: a MATCH object carries
                             // `isPureMusic: false`, so the old `'isPureMusic' in bestMatch` also

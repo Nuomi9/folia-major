@@ -411,7 +411,7 @@ describe('Bilibili API bridge write-cookie self-heal', () => {
         await bridge.request('login_status');
 
         expect(mintLoginCookies).toHaveBeenCalledTimes(1);
-        expect(mintLoginCookies.mock.calls[0][0]).toMatchObject({ SESSDATA: 'sess-token' });
+        expect((mintLoginCookies.mock.calls[0] as unknown[])[0]).toMatchObject({ SESSDATA: 'sess-token' });
         const envelope = readEnvelope(store, safeStorage);
         expect(envelope.cookies.bili_jct).toBe('csrf-token');
         expect(envelope.cookies.DedeUserID).toBe('42');

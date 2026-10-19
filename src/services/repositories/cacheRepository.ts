@@ -203,11 +203,24 @@ export const getBrowserCacheUsageByCategory = async (): Promise<CacheUsage> => {
   return usage;
 };
 
+/**
+ * Cache keys that survive a clear of their category.
+ *
+ * A lyric `_state` entry is not a copy of what was fetched - it is the listener's own choice of
+ * which lyric belongs to the track (online override or an imported file). Wiping it with the
+ * fetch cache throws that choice away and lets the next play auto-match again, which the listener
+ * experiences as "the lyric I picked keeps resetting". Clearing the fetched lyrics is fine; the
+ * choice has to outlive it.
+ */
+const survivesCategoryClear = (key: string, category: CacheCategory): boolean =>
+    category === 'lyrics' && key.endsWith('_state');
+
 export const clearBrowserCacheByCategory = async (category: CacheCategory): Promise<void> => {
   await appDatabase.transaction('rw', CACHE_TABLE_NAMES, async () => {
     await Promise.all(CACHE_TABLE_NAMES.map(async name => {
       const table = getTable(name);
-      const keys = (await table.toCollection().primaryKeys()).map(String).filter(key => matchesCategory(key, category));
+      const keys = (await table.toCollection().primaryKeys()).map(String)
+        .filter(key => matchesCategory(key, category) && !survivesCategoryClear(key, category));
       await table.bulkDelete(keys);
     }));
   });

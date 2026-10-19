@@ -41,7 +41,7 @@ import type { AudioQualityPreference, MediaId, ProviderCollection } from '../../
 import type { PlaybackSnapshot, PlaybackNavigationOptions } from '../../../../types/appPlayback';
 import { getNavidromeMatchCacheKey, type NavidromeMatchData, type NavidromeSong } from '../../../../types/navidrome';
 import { applyQueueAddBehavior } from '../../../../utils/queueAddBehavior';
-import { loadOnlineLyricsState, resolveOnlineLyrics, saveOnlineLyricsState, getOnlineLyricsStateCacheKey } from '../../../../utils/onlineLyricsState';
+import { loadOnlineLyricsState, resolveOnlineLyrics, saveAutoMatchedOnlineLyricsState, saveOnlineLyricsState, getOnlineLyricsStateCacheKey } from '../../../../utils/onlineLyricsState';
 import { hasLocalSongCover } from '../../../../utils/localSongCover';
 import { isSameLocalSongRecord } from '../../../../utils/localSongRecordEquality';
 import { getLocalCoverAssetUrl } from '../../../../services/localCoverAssetUrl';
@@ -1521,7 +1521,11 @@ export function useLibraryPlaybackController({
                 matchedLyricsSource: bestMatch.source,
                 matchedLyricsProviderPlatform: bestMatch.matchedLyricsProviderPlatform,
             };
-            await saveOnlineLyricsState(currentSong, nextState);
+            // Guarded: an override already stored is the listener's own pick, made while this search ran.
+            if (!await saveAutoMatchedOnlineLyricsState(currentSong, nextState)) {
+                setStatusMsg({ type: 'info', text: t('status.bestLyricsMatched') || '' });
+                return false;
+            }
 
             const updatedSong = { ...currentSong, onlineLyricsState: nextState, isPureMusic: false };
             setCurrentSong(prev => isSamePlaybackSong(prev, currentSong) ? updatedSong : prev);
