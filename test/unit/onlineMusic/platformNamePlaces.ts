@@ -29,6 +29,10 @@ export interface PlatformNamePlace {
 }
 
 export const PLATFORM_NAME_PLACES: Record<string, PlatformNamePlace> = {
+    // The playlist import reads a NetEase playlist and saves the matches into a Bilibili folder:
+    // the two platforms meet in this one feature, so both names stay in these two files.
+    'src/components/modal/settings/pages/integration/BilibiliPlaylistImportRows.tsx': { n: { netease: 6 }, kind: 'list', why: 'the panel that imports one platform\'s playlist into the other: its labels and its placeholder' },
+    'src/services/bilibiliPlaylistImport.ts': { n: { netease: 6 }, kind: 'list', why: 'the import itself: reads the NetEase playlist through omni, matches, saves into the Bilibili folder' },
     // The bilibili adapter's lyric fallback borrows a NetEase match (and probes the other
     // platforms' word-by-word matchers through autoMatchBestLyric), so it names them by id.
     'src/services/onlineMusic/bilibiliProvider.ts': { n: { netease: 15, qq: 1, kugou: 1 }, kind: 'question', why: 'the borrowed-lyrics fallback: a NetEase search for the same song, then the shared word-by-word probe over the platforms that have one' },
