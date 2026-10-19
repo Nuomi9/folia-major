@@ -127,6 +127,26 @@ class BilibiliRiskControlError extends Error {
     }
 }
 
+// 扫码登录成功时，B站 把登录身份放在 poll 返回的 url 查询参数里（SESSDATA / bili_jct /
+// DedeUserID / DedeUserID__ckMd5），Set-Cookie 只带了其中一部分——实测 bili_jct 不在里面。
+// 不解析这个 url，收藏夹读得到、写不了：fav/resource/deal 要 csrf=bili_jct，缺了就是
+// 「not logged in」。纯函数便于单测。
+const LOGIN_URL_COOKIE_KEYS = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'];
+const parseLoginUrlCookies = (rawUrl) => {
+    const found = {};
+    if (!rawUrl) return found;
+    try {
+        const params = new URL(String(rawUrl)).searchParams;
+        LOGIN_URL_COOKIE_KEYS.forEach((key) => {
+            const value = params.get(key);
+            if (value) found[key] = value; // searchParams 已经解过码，不再 decodeURIComponent
+        });
+    } catch (error) {
+        // 不是合法 URL：当作没有，交给 Set-Cookie 那条路
+    }
+    return found;
+};
+
 function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
     const logWarn = (message, error) => {
         const fn = warn || console.warn;
@@ -566,10 +586,11 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             const data = body?.data || {};
             const state = QR_POLL_STATE[Number(data.code)] || 'error';
             if (state === 'confirmed') {
-                if (data.refresh_token) {
-                    if (!session) session = { cookies: {}, refreshToken: '', wbi: null, mid: null, nickname: '' };
-                    session.refreshToken = String(data.refresh_token);
-                }
+                if (!session) session = { cookies: {}, refreshToken: '', wbi: null, mid: null, nickname: '' };
+                if (data.refresh_token) session.refreshToken = String(data.refresh_token);
+                // 登录身份主要在这个 url 里，不解析就只有 SESSDATA 能读、写一律 not logged in。
+                const loginCookies = parseLoginUrlCookies(data.url);
+                Object.keys(loginCookies).forEach((name) => setCookie(name, loginCookies[name]));
                 persistSession();
             }
             return { state, message: data.message || '', url: data.url || '' };
@@ -874,7 +895,7 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             const del = String(delMediaIds || '').trim();
             if (!rid || (!add && !del)) throw new Error('fav_deal: missing avid or add/del media ids');
             const csrf = session?.cookies?.bili_jct || '';
-            if (!csrf) throw new Error('fav_deal: not logged in');
+            if (!csrf) throw new Error('fav_deal: missing bili_jct (re-scan the login QR so the write token is captured)');
             const form = new URLSearchParams({ rid, type: '2', csrf });
             if (add) form.set('add_media_ids', add);
             if (del) form.set('del_media_ids', del);
@@ -924,4 +945,4 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
     };
 }
 
-module.exports = { createBilibiliApiBridge };
+module.exports = { createBilibiliApiBridge, parseLoginUrlCookies };

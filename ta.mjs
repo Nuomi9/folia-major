@@ -1,0 +1,16 @@
+import WebSocket from 'ws';
+const list = await (await fetch('http://127.0.0.1:10099/json/list')).json();
+const page = list.find(t => t.type === 'page');
+const ws = new WebSocket(page.webSocketDebuggerUrl);
+let id=0; const p=new Map();
+ws.on('message', r=>{const m=JSON.parse(r.toString()); if(m.id&&p.has(m.id)){p.get(m.id)(m);p.delete(m.id);}});
+const send=(me,pa)=>new Promise(res=>{const n=++id;p.set(n,res);ws.send(JSON.stringify({id:n,method:me,params:pa}));});
+await new Promise(r=>ws.on('open',r));
+const ev=async e=>{const r=await send('Runtime.evaluate',{expression:e,awaitPromise:true,returnByValue:true});return r.result?.result?.value ?? 'EXC';};
+console.log('current app view (from store):', await ev(`(()=>{try{const s=window.__foliaDebug?.appView; return s;}catch(e){return 'n/a'}})()`));
+console.log('lattice posters:', await ev(`document.querySelectorAll('.lattice-poster').length`));
+console.log('bravais seam:', await ev(`!!document.querySelector('[data-bravais-home-seam]')`));
+console.log('bravais tab labels:', await ev(`JSON.stringify([...document.querySelectorAll('[role=tab]')].map(n=>n.textContent.trim()))`));
+console.log('focus card:', await ev(`!!document.querySelector('[data-bravais-focus-card], .bravais-focus-card')`));
+console.log('any lyric text in DOM:', await ev(`[...document.querySelectorAll('*')].filter(n=>n.children.length===0 && n.textContent.length>6 && /[ぁ-んァ-ヶ一-龥]/.test(n.textContent)).length`));
+ws.close();

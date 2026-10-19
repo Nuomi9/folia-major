@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 // buvid3/buvid4 必须在第一个业务请求之前就被引导出来。net.fetch 的 cookie 归属也在下面锁了一条。
 
 const require = createRequire(import.meta.url);
-const { createBilibiliApiBridge } = require('../../../electron/bilibiliApiBridge.cjs');
+const { createBilibiliApiBridge, parseLoginUrlCookies } = require('../../../electron/bilibiliApiBridge.cjs');
 
 const SESSION_KEY = 'BILIBILI_SESSION_V1';
 const RISK_CONTROL_KEY = 'BILIBILI_RISK_CONTROL_V1';
@@ -335,5 +335,48 @@ describe('Bilibili API bridge 合集 seasons', () => {
 
         await expect(bridge.request('season_archives', { seasonId: '9', mid: '7' }))
             .rejects.toThrow(/season archives failed: -404/u);
+    });
+});
+
+describe('Bilibili API bridge login-URL cookies', () => {
+    it('reads the identity cookies Bilibili puts in the login redirect URL', () => {
+        const cookies = parseLoginUrlCookies(
+            'https://passport.biligame.com/crossDomain?DedeUserID=3881499'
+            + '&DedeUserID__ckMd5=abc123'
+            + '&SESSDATA=aa%2Cbb%2Ccc'
+            + '&bili_jct=deadbeef'
+            + '&gourl=https%3A%2F%2Fwww.bilibili.com',
+        );
+        // searchParams 已经解过码：SESSDATA 里的逗号要还原成原值，不能再解一次
+        expect(cookies).toEqual({
+            SESSDATA: 'aa,bb,cc',
+            bili_jct: 'deadbeef',
+            DedeUserID: '3881499',
+            DedeUserID__ckMd5: 'abc123',
+        });
+    });
+
+    it('ignores a URL without identity cookies instead of throwing', () => {
+        expect(parseLoginUrlCookies('')).toEqual({});
+        expect(parseLoginUrlCookies('not a url')).toEqual({});
+        expect(parseLoginUrlCookies('https://example.com/?foo=bar')).toEqual({});
+    });
+
+    it('stores bili_jct from the confirmed poll so favorite writes get their csrf token', async () => {
+        // 回归点：Set-Cookie 只带 SESSDATA，bili_jct 只在 data.url 里。不解析它，
+        // 收藏夹读得到、写不了（fav/resource/deal 缺 csrf → not logged in）。
+        const pollUrl = 'https://passport.biligame.com/crossDomain?DedeUserID=42'
+            + '&DedeUserID__ckMd5=abc&SESSDATA=sess%2Ctoken&bili_jct=csrf-token';
+        const { bridge, store, safeStorage } = createHarness([{
+            json: { code: 0, data: { code: 0, message: '', url: pollUrl, refresh_token: 'rt' } },
+        }]);
+
+        const state = await bridge.request('qr_poll', { key: 'k' });
+        expect(state.state).toBe('confirmed');
+
+        const envelope = readEnvelope(store, safeStorage);
+        expect(envelope.cookies.bili_jct).toBe('csrf-token');
+        expect(envelope.cookies.SESSDATA).toBe('sess,token');
+        expect(bridge.getStatus().authenticated).toBe(true);
     });
 });
