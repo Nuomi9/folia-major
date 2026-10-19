@@ -9,6 +9,7 @@ import NavidromeRows from './integration/NavidromeRows';
 import { O, SERVICES, STREAMING } from './integration/options';
 import { DesktopStageRows, WebStageRows } from './integration/StageModeRows';
 import SyncServerRows from './integration/SyncServerRows';
+import BilibiliPlaylistImportRows from './integration/BilibiliPlaylistImportRows';
 import { useSettingsPage } from './settingsPageContext';
 
 // src/components/modal/settings/pages/IntegrationPage.tsx
@@ -125,6 +126,8 @@ const IntegrationPage: React.FC = () => {
                 )}
                 {isElectron ? <DesktopStageRows /> : <WebStageRows />}
             </Group>
+
+            {isElectron && <BilibiliPlaylistImportRows />}
         </>
     );
 };

@@ -1734,6 +1734,22 @@ export default {
     "lyricMatchPriority": "Lyric match priority",
     "lyricMatchPriorityDesc": "When multiple lyric sources have high-confidence matches, prefer this source first."
   },
+  "bilibiliImport": {
+    "importedPrefix": "Imported",
+    "description": "Import a NetEase playlist into a Bilibili favorite folder: each song is matched by title similarity and duration, then saved. About 1-2 seconds per song; keep the app in the foreground.",
+    "linkLabel": "NetEase playlist link",
+    "linkPlaceholder": "https://music.163.com/playlist?id=...",
+    "parse": "Read playlist",
+    "parsed": "{{count}} songs read",
+    "folderLabel": "Target folder",
+    "folderPlaceholder": "Folder name (created when missing)",
+    "start": "Start import",
+    "waitingRiskControl": "Bilibili is rate limiting; waiting and retrying…",
+    "done": "Done: {{matched}} saved · {{unmatched}} unmatched · {{failed}} failed",
+    "unmatchedTitle": "Unmatched (no Bilibili version close enough)",
+    "failedTitle": "Failed",
+    "badLink": "No playlist id in the link (?id=...)"
+  },
   "options": {
     "ponderHints": "Ponder tutorial hints",
     "ponderHintsDesc": "Hovering a teachable control shows a hint to hold G.",

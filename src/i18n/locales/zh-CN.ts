@@ -1734,6 +1734,22 @@ export default {
     "lyricMatchPriority": "歌词匹配优先级",
     "lyricMatchPriorityDesc": "在多个歌词源都存在高置信度匹配时，优先选择该歌词源的结果。"
   },
+  "bilibiliImport": {
+    "importedPrefix": "网易云导入",
+    "description": "把网易云歌单批量导入 B 站收藏夹：逐首在 B 站搜索匹配（标题相似度 + 时长容差），自动收藏到指定收藏夹。每首约 1-2 秒，请保持应用在前台。",
+    "linkLabel": "网易云歌单链接",
+    "linkPlaceholder": "https://music.163.com/playlist?id=...",
+    "parse": "解析歌单",
+    "parsed": "已解析 {{count}} 首",
+    "folderLabel": "目标收藏夹",
+    "folderPlaceholder": "收藏夹名（不存在会自动新建）",
+    "start": "开始导入",
+    "waitingRiskControl": "B 站风控冷却中，自动等待重试…",
+    "done": "完成：成功 {{matched}} · 未匹配 {{unmatched}} · 失败 {{failed}}",
+    "unmatchedTitle": "未匹配（没有找到足够像的 B 站版本）",
+    "failedTitle": "失败",
+    "badLink": "链接里没有找到歌单 ID（?id=...）"
+  },
   "options": {
     "ponderHints": "思索教程提示",
     "ponderHintsDesc": "指针停在可教学的控件上时提示长按 G。",

@@ -1734,6 +1734,22 @@ export default {
     "lyricMatchPriority": "Prioritas pencocokan lirik",
     "lyricMatchPriorityDesc": "Saat beberapa sumber lirik memiliki kecocokan berkualitas tinggi, utamakan sumber ini terlebih dahulu."
   },
+  "bilibiliImport": {
+    "importedPrefix": "Impor",
+    "description": "Impor daftar putar NetEase ke folder favorit Bilibili: tiap lagu dicocokkan lewat kemiripan judul dan durasi, lalu disimpan. Sekitar 1-2 detik per lagu; biarkan aplikasi di depan.",
+    "linkLabel": "Tautan daftar putar NetEase",
+    "linkPlaceholder": "https://music.163.com/playlist?id=...",
+    "parse": "Baca daftar putar",
+    "parsed": "{{count}} lagu terbaca",
+    "folderLabel": "Folder tujuan",
+    "folderPlaceholder": "Nama folder (dibuat bila belum ada)",
+    "start": "Mulai impor",
+    "waitingRiskControl": "Bilibili membatasi permintaan; menunggu lalu mencoba lagi…",
+    "done": "Selesai: {{matched}} tersimpan · {{unmatched}} tak cocok · {{failed}} gagal",
+    "unmatchedTitle": "Tak cocok (tidak ada versi Bilibili yang cukup mirip)",
+    "failedTitle": "Gagal",
+    "badLink": "Tidak ada id daftar putar di tautan (?id=...)"
+  },
   "options": {
     "ponderHints": "Petunjuk tutorial Ponder",
     "ponderHintsDesc": "Mengarahkan kursor ke kontrol yang bisa dipelajari memunculkan petunjuk menahan G.",
