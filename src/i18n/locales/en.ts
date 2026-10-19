@@ -1734,6 +1734,13 @@ export default {
     "lyricMatchPriority": "Lyric match priority",
     "lyricMatchPriorityDesc": "When multiple lyric sources have high-confidence matches, prefer this source first."
   },
+  "bilibiliFolders": {
+    "description": "Only the folders ticked here appear on the home playlists page. Ticking none hides them all; Show all restores the default.",
+    "refresh": "Read again",
+    "showAll": "Show all",
+    "empty": "No folders read: sign in to Bilibili in the app first.",
+    "collected": "subscribed"
+  },
   "bilibiliImport": {
     "importedPrefix": "Imported",
     "description": "Import a NetEase playlist into a Bilibili favorite folder: each song is matched by title similarity and duration, then saved. About 1-2 seconds per song; keep the app in the foreground.",
@@ -1751,6 +1758,7 @@ export default {
     "badLink": "No playlist id in the link (?id=...)"
   },
   "options": {
+    "bilibiliFolders": "Bilibili folders",
     "ponderHints": "Ponder tutorial hints",
     "ponderHintsDesc": "Hovering a teachable control shows a hint to hold G.",
     "ponderHintsAlways": "Always show",

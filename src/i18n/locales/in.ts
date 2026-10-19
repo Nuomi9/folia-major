@@ -1734,6 +1734,13 @@ export default {
     "lyricMatchPriority": "Prioritas pencocokan lirik",
     "lyricMatchPriorityDesc": "Saat beberapa sumber lirik memiliki kecocokan berkualitas tinggi, utamakan sumber ini terlebih dahulu."
   },
+  "bilibiliFolders": {
+    "description": "Hanya folder yang dicentang di sini yang muncul di halaman daftar putar. Tanpa centang berarti tidak ada; Tampilkan semua mengembalikan semula.",
+    "refresh": "Baca ulang",
+    "showAll": "Tampilkan semua",
+    "empty": "Folder belum terbaca: masuk ke Bilibili di aplikasi dulu.",
+    "collected": "langganan"
+  },
   "bilibiliImport": {
     "importedPrefix": "Impor",
     "description": "Impor daftar putar NetEase ke folder favorit Bilibili: tiap lagu dicocokkan lewat kemiripan judul dan durasi, lalu disimpan. Sekitar 1-2 detik per lagu; biarkan aplikasi di depan.",
@@ -1751,6 +1758,7 @@ export default {
     "badLink": "Tidak ada id daftar putar di tautan (?id=...)"
   },
   "options": {
+    "bilibiliFolders": "Folder Bilibili",
     "ponderHints": "Petunjuk tutorial Ponder",
     "ponderHintsDesc": "Mengarahkan kursor ke kontrol yang bisa dipelajari memunculkan petunjuk menahan G.",
     "ponderHintsAlways": "Selalu tampilkan",

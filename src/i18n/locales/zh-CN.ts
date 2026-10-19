@@ -1734,6 +1734,13 @@ export default {
     "lyricMatchPriority": "歌词匹配优先级",
     "lyricMatchPriorityDesc": "在多个歌词源都存在高置信度匹配时，优先选择该歌词源的结果。"
   },
+  "bilibiliFolders": {
+    "description": "勾上的收藏夹才会出现在首页歌单页。一个都不勾就一个都不显示；「全部显示」恢复原样。",
+    "refresh": "重新读取",
+    "showAll": "全部显示",
+    "empty": "没有读到收藏夹：先在应用里登录 B 站。",
+    "collected": "订阅"
+  },
   "bilibiliImport": {
     "importedPrefix": "网易云导入",
     "description": "把网易云歌单批量导入 B 站收藏夹：逐首在 B 站搜索匹配（标题相似度 + 时长容差），自动收藏到指定收藏夹。每首约 1-2 秒，请保持应用在前台。",
@@ -1751,6 +1758,7 @@ export default {
     "badLink": "链接里没有找到歌单 ID（?id=...）"
   },
   "options": {
+    "bilibiliFolders": "B 站收藏夹",
     "ponderHints": "思索教程提示",
     "ponderHintsDesc": "指针停在可教学的控件上时提示长按 G。",
     "ponderHintsAlways": "始终显示",

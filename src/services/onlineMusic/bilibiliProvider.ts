@@ -13,6 +13,7 @@ import type { JsonValue } from '../../types/onlineMusic';
 import type { SongResult, UnifiedSong } from '../../types';
 import { OnlineProviderError } from '../../types/onlineMusic';
 import { fetchBilibiliBridgeStatus, getBilibiliTransportAvailability, requestBilibili } from './bilibiliTransport';
+import { filterBilibiliCollections } from './bilibiliFolderFilter';
 
 // src/services/onlineMusic/bilibiliProvider.ts
 // Adapter for the Bilibili bridge in the Electron main process: QR scan login, favorite folders
@@ -474,12 +475,14 @@ const getUserPlaylists = async (
         console.warn('[BilibiliProvider] fav-collected:error', collectedFirstPage.reason);
     }
 
-    const collections = [
+    const collections = filterBilibiliCollections([
         // created/list 的条目顶层没有 mid（UP 主在 upper 里），补上让 isOwned 语义不变。
         // owned 标记驱动 mutations.canAddToPlaylist：B 站只允许往自己创建的夹子里加歌。
         ...createdList.map((entry: any) => normalizeFavFolder({ ...entry, mid: entry?.upper?.mid ?? entry?.mid }, true)),
         ...collectedList.map((entry: any) => normalizeFavFolder(entry, false)),
-    ].filter((collection): collection is ProviderCollection => collection !== null);
+    ].filter((collection): collection is ProviderCollection => collection !== null));
+    // 白名单（设置里挑的那几个夹子）在分页之前生效：total / hasMore 都按过滤后的列表算，
+    // 否则首页会一边只显示两个夹子、一边继续为看不见的条目翻页。
     // 这是一次真实的收藏夹刷新，之前缓存的条目身份不再可信。
     clearBilibiliFavIdsCache();
 

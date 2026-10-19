@@ -10,6 +10,7 @@ import type { SettingsSubviewId } from '../../../../stores/useSettingsModalStore
 
 export const SETTINGS_ANCHOR_DEFINITIONS = {
     // pages/IntegrationPage
+    bilibiliFolders: { section: 'integration' },
     bilibiliImport: { section: 'integration' },
 
     // pages/AppearancePage
