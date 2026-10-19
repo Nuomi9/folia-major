@@ -1,4 +1,4 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
     CalendarPlus,
@@ -10,6 +10,7 @@ import {
     LayoutGrid,
     ListFilter,
     Library,
+    ListChecks,
     Maximize2,
     MicVocal,
 } from 'lucide-react';
@@ -23,6 +24,8 @@ import { abbreviateSeamTabLabel, abbreviateSeamTabLabels } from './bravaisSeamTa
 import { useBravaisSeamTabsFit } from './useBravaisSeamTabsFit';
 import { BravaisSeamFlipText, useBravaisSeamFade } from './BravaisSeamFlip';
 import { useBravaisReducedTransitions } from './bravaisMotion';
+import BravaisSeamFolderList from './BravaisSeamFolderList';
+import { useBravaisSeamStore } from './bravaisSeamLevel';
 import { bravaisRevealMotion, BRAVAIS_SEAM_FLIP_IN_EASING_BEZIER } from './bravaisSeamMotion';
 import { BRAVAIS_SEAM_FLIP_IN_MS } from './bravaisConstants';
 import BravaisSeamFilterField from './BravaisSeamFilterField';
@@ -219,8 +222,10 @@ const HomeSeamHead: React.FC<{
     shorts: readonly string[] | null;
     lead: React.ReactNode;
     onSelectTab?: (key: string) => void;
+    /** 页签列下面的「收藏夹快览」按钮（测量副本里给同尺寸的占位，让页签级别把它算进高度）。 */
+    folder?: React.ReactNode;
     measure?: boolean;
-}> = ({ title, hideTitle, tabs, shorts, lead, onSelectTab, measure = false }) => {
+}> = ({ title, hideTitle, tabs, shorts, lead, onSelectTab, folder, measure = false }) => {
     return (
         <div className="bravais-seam-home-head">
             <div className={`bravais-seam-home-title${hideTitle ? ' is-hidden' : ''}`} data-bravais-home-title={measure ? undefined : hideTitle ? 'hidden' : 'shown'}>
@@ -253,6 +258,7 @@ const HomeSeamHead: React.FC<{
                         ))}
                     </div>
                 ))}
+                {folder}
             </div>
         </div>
     );
@@ -300,6 +306,23 @@ const BravaisSeamHome: React.FC<{
     // 缩减级别变了（标题隐藏、页签缩成一个字、入口挪进 / 挪出菜单）：页头与切换位淡入新的样子，不硬切。
     useBravaisSeamFade(`${level}|${shortcutsInColumn}`, headRef, slotRef, jumpsRef);
     const expand = () => setLevel('full');
+    // 收藏夹快览（页签列下面那颗按钮 + 浮在窄缝左侧的一列，portal 挂 body，见 BravaisSeamFolderList）：
+    // 墙是无限拼贴，二三十个收藏夹要转好几圈；快览一眼扫完。只在当前目录有歌单类条目时出现，缝离开 full 就关掉。
+    const folderList = home?.folderList ?? null;
+    const [folderOpen, setFolderOpen] = useState(false);
+    const folderAnchorRef = useRef<HTMLButtonElement | null>(null);
+    const seamLevel = useBravaisSeamStore(state => state.level);
+    useEffect(() => { if (seamLevel !== 'full') setFolderOpen(false); }, [seamLevel]);
+    const folderButton = folderList ? (
+        <button type="button" className="bravais-seam-icon bravais-folder-toggle" ref={folderAnchorRef}
+            data-bravais-seam-action="folder-list" aria-expanded={folderOpen} aria-haspopup="listbox"
+            aria-label={folderList.toggleLabel} title={folderList.toggleLabel}
+            onClick={() => { if (compact) expand(); setFolderOpen(current => !current); }}>
+            <ListChecks aria-hidden />
+        </button>
+    ) : null;
+    // 测量副本里的同尺寸占位：快览按钮计入页头高度，页签该不该缩一个字才把它算进去。
+    const folderMeasure = folderList ? <span className="bravais-seam-icon bravais-folder-toggle" aria-hidden /> : null;
     const foldButton = (
         <button type="button" className="bravais-seam-icon" data-bravais-seam-action="hide" onClick={() => setLevel('hidden')}
             aria-label={t('libraryBravais.seamFold')} title={t('libraryBravais.seamFold')}>
@@ -313,7 +336,7 @@ const BravaisSeamHome: React.FC<{
                 <div className="bravais-seam-home-nav-content">
                     <div ref={headRef}>
                         <HomeSeamHead title={seam.title} hideTitle={level !== 'titled'} tabs={tabs} shorts={short ? shortLabels : null}
-                            lead={foldButton} onSelectTab={seam.onSelectTab} />
+                            lead={foldButton} onSelectTab={seam.onSelectTab} folder={folderButton} />
                     </div>
                     {/* fb3：中段在页头与工具格之间的剩余空间里竖直居中。 */}
                     <div ref={middleRef} className="bravais-seam-home-middle">
@@ -351,11 +374,11 @@ const BravaisSeamHome: React.FC<{
                 fb2 第二轮：两份——带标题的全名页头、不带标题的全名页头。fb3：再加一份全名二级切换（容器常在）。 */}
             <div ref={titledHeadRef} className="bravais-seam-home-measure" aria-hidden>
                 <HomeSeamHead title={seam.title} hideTitle={false} tabs={tabs} shorts={null} measure
-                    lead={<span className="bravais-seam-icon" />} />
+                    lead={<span className="bravais-seam-icon" />} folder={folderMeasure} />
             </div>
             <div ref={bareHeadRef} className="bravais-seam-home-measure" aria-hidden>
                 <HomeSeamHead title={seam.title} hideTitle tabs={tabs} shorts={null} measure
-                    lead={<span className="bravais-seam-icon" />} />
+                    lead={<span className="bravais-seam-icon" />} folder={folderMeasure} />
             </div>
             {/* 全名二级切换的测量副本；直达入口一列的测量副本（fb11：入口贴在中段底部，单独量）。 */}
             <div ref={fullSlotRef} className="bravais-seam-home-measure" aria-hidden>
@@ -380,6 +403,10 @@ const BravaisSeamHome: React.FC<{
                     aria-label={seam.filter.placeholder} title={`${seam.filter.placeholder} · ${seam.filter.query}`}>
                     <ListFilter aria-hidden />
                 </button>
+            )}
+            {folderList && !compact && (
+                <BravaisSeamFolderList folderList={folderList} anchorRef={folderAnchorRef}
+                    open={folderOpen} onClose={() => setFolderOpen(false)} />
             )}
             {/* fb4：账户入口贴在工具格正上方（不在中段），平台列表从它往上弹出、盖在导航区上。 */}
             {home?.account && <BravaisSeamAccountSlot account={home.account} compact={compact} />}

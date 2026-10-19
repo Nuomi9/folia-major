@@ -13,7 +13,7 @@ import { useLibraryDirectoryScope } from '../../core/directory/useLibraryDirecto
 import { useLibraryDirectoryActions } from '../../core/directory/useLibraryDirectoryActions';
 import { useHiddenCollections } from '../../core/collection/useHiddenCollections';
 import type { BravaisItemKind, BravaisLayer, BravaisSeamModel } from './bravaisLayer';
-import type { BravaisHomeAccount, BravaisHomeSection, BravaisHomeShortcut, BravaisHomeTool } from './bravaisHomeModels';
+import type { BravaisHomeAccount, BravaisHomeFolderList, BravaisHomeSection, BravaisHomeShortcut, BravaisHomeTool } from './bravaisHomeModels';
 import type { BravaisLayerEntries, BravaisSeamFilter, BravaisSeamMenuItem } from './bravaisSeamModels';
 import { createHomeItemCache, projectHomeShortcuts, projectHomeWallItems, resolveHomeWallMode, toHomeEntry } from './bravaisHomeProjection';
 import type { BravaisHomeChrome } from './useBravaisHomeChrome';
@@ -252,6 +252,34 @@ const BravaisHomeDirectory: React.FC<BravaisHomeDirectoryProps> = ({
     }, []);
 
     // ---- 缝 ----
+    /**
+     * 收藏夹快览（页签列下面那颗按钮浮出的一列）：当前目录里显示着的歌单类条目，平铺一行一个。
+     * 墙是无限拼贴，二三十个收藏夹要转好几圈；快览一眼扫完，点一行 = 点墙上那张卡（onOpenItem 同一条路）。
+     * 数据来自已经拿到的卡片（displayItems），不另发请求，因此不给任何平台增加风控成本。
+     * 目录里没有歌单类条目时是 null（不画按钮）：专辑 / 艺术家 / 文件夹页签用不上它。
+     */
+    const folderList = useMemo<BravaisHomeFolderList | null>(() => {
+        const entries = displayItems
+            .filter(entry => entry.type === 'playlist')
+            .map(entry => ({
+                itemKey: entry.itemKey,
+                title: entry.name,
+                countLabel: entry.trackCount && entry.trackCount > 0
+                    ? `${entry.trackCount} ${t('home.songs')}`
+                    : '',
+                coverUrl: entry.coverUrl,
+            }));
+        if (entries.length === 0) return null;
+        return {
+            label: chrome.tabs.find(tab => tab.active)?.label ?? chrome.title,
+            countLabel: t('libraryBravaisHome.folderListCount', { count: entries.length }),
+            closeLabel: t('ui.close'),
+            emptyLabel: t('libraryBravaisHome.folderListEmpty'),
+            toggleLabel: t('libraryBravaisHome.folderListToggle'),
+            entries,
+            onOpenItem,
+        };
+    }, [chrome.tabs, chrome.title, displayItems, onOpenItem, t]);
     // 直达入口：只随「有哪几张、叫什么、在墙上是哪个 key」变（卡片数据就地更新不换身份）。
     const shortcutSpecs = useMemo(
         () => projectHomeShortcuts(shortcutCards ?? items, { source, hiddenIds, isDirect: card => isDirectRef.current(card) }),
@@ -322,11 +350,12 @@ const BravaisHomeDirectory: React.FC<BravaisHomeDirectoryProps> = ({
             menu,
             menuLabel: t('libraryBravaisHome.more'),
             manage,
+            folderList,
             scan: chrome.scan,
             search: chrome.search,
             account,
         },
-    }), [account, chrome.onSelectTab, chrome.scan, chrome.search, chrome.tabs, chrome.title, filter, manage, menu, meta, onSelectSection, sections, shortcuts, status, t, tools]);
+    }), [account, chrome.onSelectTab, chrome.scan, chrome.search, chrome.tabs, chrome.title, filter, folderList, manage, menu, meta, onSelectSection, sections, shortcuts, status, t, tools]);
 
     const entriesModel = useMemo<BravaisLayerEntries>(() => ({
         hasPanel: Boolean(batchConfig),

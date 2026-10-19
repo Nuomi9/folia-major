@@ -102,6 +102,10 @@ export default {
     "connect": "Hubungkan layanan streaming",
     "noMatch": "Tidak ada yang cocok di halaman ini",
     "shortcuts": "Langsung ke",
+    "folderList": "Folder",
+    "folderListToggle": "Lihat folder sebagai daftar",
+    "folderListEmpty": "Belum ada folder di sini",
+    "folderListCount": "{{count}} folder",
     "special": {"liked": "Lagu Disukai", "cloud": "Cloud Drive", "personal-fm": "FM Pribadi", "daily": "Harian", "all-songs": "Semua Lagu", "local-favorites": "Favorit", "navidrome-random": "Acak", "navidrome-favorites": "Berbintang"}
   },
   "libraryTui": {

@@ -102,6 +102,10 @@ export default {
     "connect": "Connect a streaming service",
     "noMatch": "Nothing on this page matches",
     "shortcuts": "Jump to",
+    "folderList": "Folders",
+    "folderListToggle": "Browse folders as a list",
+    "folderListEmpty": "No folders here yet",
+    "folderListCount": "{{count}} folders",
     "special": {"liked": "Liked Songs", "cloud": "Cloud Drive", "personal-fm": "Personal FM", "daily": "Daily Picks", "all-songs": "All Songs", "local-favorites": "Favorites", "navidrome-random": "Random", "navidrome-favorites": "Starred"}
   },
   "libraryTui": {

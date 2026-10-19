@@ -102,6 +102,10 @@ export default {
     "connect": "连接在线平台",
     "noMatch": "没有匹配的条目",
     "shortcuts": "直达",
+    "folderList": "收藏夹",
+    "folderListToggle": "快速查看收藏夹",
+    "folderListEmpty": "这里还没有收藏夹",
+    "folderListCount": "{{count}} 个",
     "special": {"liked": "我喜欢的音乐", "cloud": "云盘", "personal-fm": "私人FM", "daily": "每日推荐", "all-songs": "全部歌曲", "local-favorites": "我喜欢", "navidrome-random": "随机音乐", "navidrome-favorites": "收藏"}
   },
   "libraryTui": {

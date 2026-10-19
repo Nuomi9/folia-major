@@ -117,6 +117,36 @@ export type BravaisHomeAccount = {
     onOpen: (pressed: Element | null) => void;
 };
 
+/**
+ * 收藏夹快览（窄缝页签列下面那个按钮浮出的一列）：当前目录里可见的集合，平铺成一行一个，
+ * 点一行 = 点墙上那张卡（走层描述的 onOpenItem）。存在的理由：墙是无限拼贴，二三十个收藏夹
+ * 要转好几圈；快览一眼扫完。条目都来自首页已经拿到的卡片，不另发请求。
+ */
+export type BravaisHomeFolderList = {
+    /** 那一列的读屏名与面板标题（当前页签的名字，例如「歌单」）。 */
+    label: string;
+    /** 标题右侧的「N 个」。 */
+    countLabel: string;
+    /** 面板里关闭按钮的名字。 */
+    closeLabel: string;
+    /** 一个都没有时的说明。 */
+    emptyLabel: string;
+    /** 按钮的名字（悬停提示与读屏）。 */
+    toggleLabel: string;
+    entries: readonly BravaisHomeFolderEntry[];
+    /** 打开一个条目：surface 给的层回调（与点墙上那张磁贴同一条路）。 */
+    onOpenItem: (itemKey: string) => void;
+};
+
+export type BravaisHomeFolderEntry = {
+    /** 墙上的条目 key（`card:<type>:<id>`）。 */
+    itemKey: string;
+    title: string;
+    /** 「N 首」；曲目数未知时为空串。 */
+    countLabel: string;
+    coverUrl?: string;
+};
+
 /** 首页层在缝里的那一部分（BravaisSeamModel.home）。 */
 export type BravaisHomeSeam = {
     /** 二级切换（在线页签没有）。 */
@@ -134,6 +164,8 @@ export type BravaisHomeSeam = {
     manage?: BravaisHomeManage | null;
     /** 元数据行：扫描进度（本地导入 / 重扫时）。 */
     scan?: string | null;
+    /** 收藏夹快览：页签列下面的按钮浮出一列集合；当前目录没有集合卡片时为 null（不画按钮）。 */
+    folderList?: BravaisHomeFolderList | null;
     search: BravaisHomeSearch;
     /** B10 的账户位（只有在线页签有）。 */
     account?: BravaisHomeAccount | null;
