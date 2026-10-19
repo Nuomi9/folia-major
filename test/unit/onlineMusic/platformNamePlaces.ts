@@ -31,7 +31,7 @@ export interface PlatformNamePlace {
 export const PLATFORM_NAME_PLACES: Record<string, PlatformNamePlace> = {
     // The bilibili adapter's lyric fallback borrows a NetEase match (and probes the other
     // platforms' word-by-word matchers through autoMatchBestLyric), so it names them by id.
-    'src/services/onlineMusic/bilibiliProvider.ts': { n: { netease: 14, qq: 1, kugou: 1 }, kind: 'question', why: 'the borrowed-lyrics fallback: a NetEase search for the same song, then the shared word-by-word probe over the platforms that have one' },
+    'src/services/onlineMusic/bilibiliProvider.ts': { n: { netease: 15, qq: 1, kugou: 1 }, kind: 'question', why: 'the borrowed-lyrics fallback: a NetEase search for the same song, then the shared word-by-word probe over the platforms that have one' },
     'api-ts/lyric-proxy.ts': { n: { qq: 2, kugou: 1 }, kind: 'main', why: 'the hosts the lyric relay may reach' },
     'api-ts/qq.ts': { n: { qq: 10 }, kind: 'main', why: 'the serverless entry of the QQ backend; the host finds it by path' },
     'api/lyric-proxy.js': { n: { qq: 2, kugou: 1 }, kind: 'main', why: 'the built copy of api-ts/lyric-proxy.ts' },
