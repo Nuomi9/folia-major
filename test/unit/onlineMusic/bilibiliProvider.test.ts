@@ -49,19 +49,10 @@ const archive = (aid: number, title = `合集条目${aid}`) => ({
 const getPlaylistTracks = (id: number | string, limit: number, offset: number, collection?: ProviderCollection) =>
     bilibiliProvider.catalog!.getPlaylistTracks!(id, limit, offset, collection);
 // 收藏夹内容的身份列表（resource/ids）与详情（resource/infos）
-const favIds = (count: number, start = 100) =>
-    Array.from({ length: count }, (_, i) => ({ id: start + i, type: 2, bvid: `BV${start + i}` }));
-
-const requestedResources = () =>
-    requestMock.mock.calls
-        .filter(call => call[0] === 'fav_resource_infos')
-        .map(call => String(call[1].resources));
-
 describe('bilibiliProvider catalog', () => {
     beforeEach(() => {
         requestMock.mockReset();
-        clearBilibiliFavIdsCache();
-    });
+        });
 
     it('reads 合集 folders through season_archives instead of the empty fav_resources list', async () => {
         requestMock.mockImplementation(async (operation: string) => (operation === 'season_archives'
@@ -95,74 +86,54 @@ describe('bilibiliProvider catalog', () => {
         expect(page.items[0].album?.coverUrl).toBe('https://i0.hdslb.com/bfs/archive/1000.jpg');
     });
 
-    it('reads ordinary favorite folders through ids + infos instead of paging one by one', async () => {
+    it('reads an ordinary favorite folder through the paged list, like biu does', async () => {
+        // 回归点：resource/infos 是 B站 风控最敏感的接口之一（实测 2 首歌的收藏夹也会 412），
+        // 所以主路径只走 fav/resource/list——它一页 20 条、一次给全字段，不需要第二步补详情。
         requestMock.mockImplementation(async (operation: string, params: any = {}) => {
-            if (operation === 'fav_resource_ids') return favIds(2, 11);
-            const ids = String(params.resources || '').split(',').map(entry => Number(entry.split(':')[0]));
-            return ids.map(id => videoMedia(id));
+            if (operation !== 'fav_resources') return [];
+            return { medias: [videoMedia(params.pn * 10)], info: { media_count: 1 } };
         });
 
-        const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
+        const page = await getPlaylistTracks('1234', 20, 0, favFolder);
 
-        expect(requestMock.mock.calls.map(call => call[0])).toEqual(['fav_resource_ids', 'fav_resource_infos']);
-        expect(requestedResources()).toEqual(['11:2,12:2']);
-        expect(page.items.map(song => song.id)).toEqual(['bili-video-11', 'bili-video-12']);
-        expect(page.total).toBe(2);
+        expect(requestMock.mock.calls.map(call => call[0])).toEqual(['fav_resources']);
+        expect(requestMock.mock.calls[0][1]).toMatchObject({ mediaId: '1234', pn: 1, ps: 20 });
+        expect(page.items.map(song => song.id)).toEqual(['bili-video-10']);
+        expect(page.total).toBe(1);
         expect(page.hasMore).toBe(false);
-        expect(page.nextOffset).toBe(2);
     });
 
-    it('caps detail batches per call and lets the caller keep paging', async () => {
+    it('caps how many upstream pages one call may fetch', async () => {
         requestMock.mockImplementation(async (operation: string, params: any = {}) => {
-            if (operation === 'fav_resource_ids') return favIds(200);
-            const ids = String(params.resources || '').split(',').map(entry => Number(entry.split(':')[0]));
-            return ids.map(id => videoMedia(id));
+            if (operation !== 'fav_resources') return [];
+            // 永远返回满一页，逼出分页上限
+            return {
+                medias: Array.from({ length: 20 }, (_, i) => videoMedia((params.pn - 1) * 20 + i)),
+                info: { media_count: 2000 },
+            };
         });
 
         // 曲墙后台补全一次要 1000 条
         const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
 
-        // 2 批 x 20 条：一次点开只发 3 个请求（ids + 2 批 infos），把突发压到风控阈值以下；
-        // 总数是 ids 给的，不用靠"页面不满"去猜，多出来的条目由调用方接着要。
-        expect(requestedResources()).toHaveLength(2);
-        expect(requestedResources()[0].split(',')).toHaveLength(20);
-        expect(page.items).toHaveLength(40);
-        expect(page.total).toBe(200);
+        // MAX_PAGES_PER_CALL = 3：一次调用最多替调用方打 3 个分页请求，剩下的由它自己接着要。
+        expect(requestMock.mock.calls).toHaveLength(3);
+        expect(page.items).toHaveLength(60);
+        expect(page.total).toBe(2000);
         expect(page.hasMore).toBe(true);
-        expect(page.nextOffset).toBe(40);
-
-        const next = await getPlaylistTracks('1234', 1000, 40, favFolder);
-        expect(next.items[0].id).toBe('bili-video-140');
+        expect(page.nextOffset).toBe(60);
     });
 
     it('does not claim more entries than the folder has', async () => {
         requestMock.mockImplementation(async (operation: string, params: any = {}) => {
-            if (operation === 'fav_resource_ids') return favIds(20);
-            const ids = String(params.resources || '').split(',').map(entry => Number(entry.split(':')[0]));
-            return ids.map(id => videoMedia(id));
+            if (operation !== 'fav_resources') return [];
+            return { medias: Array.from({ length: 5 }, (_, i) => videoMedia(i)), info: { media_count: 5 } };
         });
 
         const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
 
-        expect(requestedResources()).toHaveLength(1);
-        expect(page.items).toHaveLength(20);
+        expect(page.items).toHaveLength(5);
         expect(page.hasMore).toBe(false);
-    });
-
-    it('falls back to paged fav_resources when the ids path fails', async () => {
-        // ids 接口挂了也不能让整个收藏夹变成"拉不出来"
-        requestMock.mockImplementation(async (operation: string, params: any = {}) => {
-            if (operation === 'fav_resource_ids') throw new Error('resource ids failed: -400');
-            if (operation === 'fav_resources') {
-                return { medias: [videoMedia(params.pn * 100)], info: { media_count: 1 } };
-            }
-            return [];
-        });
-
-        const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
-
-        expect(requestMock.mock.calls.some(call => call[0] === 'fav_resources')).toBe(true);
-        expect(page.items.map(song => song.id)).toEqual(['bili-video-100']);
     });
 
     it('normalizes search results: strips highlight tags, parses mm:ss duration', async () => {
@@ -190,28 +161,6 @@ describe('bilibiliProvider catalog', () => {
             sourceRef: { mediaId: 'video:777', providerData: { bvid: 'BV777' } },
         });
         expect(page.total).toBe(42);
-    });
-
-    it('advances paging by consumed ids even when dead entries drop out of infos', async () => {
-        // 回归点：收藏夹里的失效稿件不会出现在 infos 响应里。若按"拿到的条目数"推进
-        // nextOffset，offset 会和 ids 索引错位（重复拉、漏拉、提前收尾）。
-        const allIds = favIds(30);
-        const alive = new Set(allIds.filter(entry => entry.id % 2 === 0).map(entry => entry.id));
-        requestMock.mockImplementation(async (operation: string, params: any = {}) => {
-            if (operation === 'fav_resource_ids') return allIds;
-            const requested = String(params.resources || '')
-                .split(',')
-                .map(entry => Number(entry.split(':')[0]))
-                .filter(id => alive.has(id));
-            return requested.map(id => videoMedia(id));
-        });
-
-        const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
-
-        expect(page.items).toHaveLength(15);
-        // 30 个 id 全部消费掉，哪怕只有 15 个有效
-        expect(page.nextOffset).toBe(30);
-        expect(page.hasMore).toBe(false);
     });
 
     it('rejects a 合集 folder cached without its author mid rather than returning an empty wall', async () => {

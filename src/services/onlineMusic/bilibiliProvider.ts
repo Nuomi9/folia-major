@@ -125,18 +125,10 @@ const SEASON_PAGE_SIZE = 50;
 // 不截断就是一次操作换来几十连续请求，B站 在第 7 页左右回 412。多出来的条目由调用方
 // 拿着 nextOffset/hasMore 再要一次，节奏交给上层的循环间隔去控制。
 const MAX_PAGES_PER_CALL = 3;
-// 走 ids + infos 两阶段时的批量上限：一次调用最多补 4 批 × 20 条。比逐页 list 少一半往返，
-// 而且总数来自 ids，不需要靠"页面返回不足一页"去猜是否到底。
-const FAV_INFO_BATCH_SIZE = 20;
-const MAX_INFO_BATCHES_PER_CALL = 2;
-// ids 列表在一次浏览会话里是稳定的，缓存住可以省掉每次翻页的一个额外请求。
-const FAV_IDS_CACHE_TTL_MS = 10 * 60 * 1000;
-const favIdsCache = new Map<string, { at: number; entries: { id: string; type: number; bvid: string }[] }>();
 
 // 收藏夹列表一刷新，之前缓存的条目身份就必须作废：用户可能刚收藏/取消了歌。
-export const clearBilibiliFavIdsCache = (mediaId?: string) => {
-    if (mediaId) favIdsCache.delete(mediaId);
-    else favIdsCache.clear();
+export const clearBilibiliFavIdsCache = (_mediaId?: string) => {
+    // 收藏夹列表刷新后没有本地缓存要作废了（曲目一律现读），保留这个导出给调用方。
 };
 
 const normalizeFavMediaSong = (media: any): UnifiedSong | null => {
@@ -495,25 +487,6 @@ const getUserPlaylists = async (
     };
 };
 
-// 收藏夹全部条目的身份列表。`resource/ids` 不受 ps<=20 限制，一个请求就能拿到准确总数和
-// 所有 {id, type}，之后的详情按显示需要分批补，不必为了知道"还有没有"去多翻一页。
-const loadFavIds = async (mediaId: string) => {
-    const cached = favIdsCache.get(mediaId);
-    if (cached && Date.now() - cached.at < FAV_IDS_CACHE_TTL_MS) return cached.entries;
-    const data = await requestBilibili<any>('fav_resource_ids', { mediaId });
-    const list = Array.isArray(data) ? data : (Array.isArray(data?.list) ? data.list : []);
-    const entries = list
-        .filter((entry: any) => PLAYABLE_FAV_MEDIA_TYPES.has(Number(entry?.type)))
-        .map((entry: any) => ({
-            id: String(entry?.id ?? ''),
-            type: Number(entry?.type),
-            bvid: String(entry?.bvid || entry?.bv_id || ''),
-        }))
-        .filter((entry: { id: string }) => Boolean(entry.id));
-    favIdsCache.set(mediaId, { at: Date.now(), entries });
-    return entries;
-};
-
 // 逐页 fav/resource/list 的老通路。ids/infos 任一环节出错时兜底，避免新通路把整个收藏夹
 // 变成"拉不出来"。
 const getPlaylistTracksByPages = async (
@@ -610,50 +583,13 @@ const getPlaylistTracks = async (
         };
     }
 
-    // 普通收藏夹：ids 拿全部身份 → infos 按显示需要分批补详情。桥那边对只读请求放行到
-    // 3 路并发，这些批次是并行发出去的，不再是逐页排队。
-    try {
-        const entries = await loadFavIds(mediaId);
-        const total = entries.length;
-        const start = Math.max(0, offset);
-        const wanted = entries.slice(start, start + Math.max(1, limit));
-        const capped = wanted.slice(0, MAX_INFO_BATCHES_PER_CALL * FAV_INFO_BATCH_SIZE);
-
-        const batches: (typeof entries)[] = [];
-        for (let index = 0; index < capped.length; index += FAV_INFO_BATCH_SIZE) {
-            batches.push(capped.slice(index, index + FAV_INFO_BATCH_SIZE));
-        }
-
-        const songs: UnifiedSong[] = [];
-        const results = await Promise.all(batches.map(async (batch) => {
-            const data = await requestBilibili<any>('fav_resource_infos', {
-                resources: batch.map((entry: { id: string; type: number }) => `${entry.id}:${entry.type}`).join(','),
-            });
-            const infos: any[] = Array.isArray(data) ? data : [];
-            return infos
-                // infos 的条目结构和 fav/resource/list 的 media 一致，直接复用归一化
-                .map((info: any) => normalizeFavMediaSong({ ...info, bvid: info?.bvid || info?.bv_id }))
-                .filter((song): song is UnifiedSong => song !== null);
-        }));
-        results.forEach(list => songs.push(...list));
-
-        // 分页按"消费掉的 id 数"推进，而不是拿到的条目数：收藏夹里的失效稿件不会出现在
-        // infos 响应里，若按条目数推进会让 offset 与 ids 索引错位（重复拉、漏拉、提前收尾）。
-        const consumed = capped.length;
-        return {
-            items: songs,
-            total,
-            hasMore: start + consumed < total,
-            nextOffset: start + consumed,
-        };
-    } catch (error) {
-        console.warn('[BilibiliProvider] fav ids/infos path failed; falling back to paged list', {
-            name: error instanceof Error ? error.name : 'Error',
-            message: error instanceof Error ? error.message : String(error),
-        });
-        favIdsCache.delete(mediaId);
-        return getPlaylistTracksByPages(mediaId, limit, offset);
-    }
+    // 普通收藏夹走 fav/resource/list 逐页取，和 biu 一样。
+    //
+    // 曾经的主路径是「resource/ids 拿全部身份 → resource/infos 分批补详情」：往返更少，
+    // 但 infos 是 B站 风控最敏感的接口之一——实测一个只有 2 首歌的收藏夹，ids 正常返回，
+    // 紧跟着的 infos 直接 412，整个音源进入冷却。biu 从不走 infos，它一页 20 条翻列表。
+    // 列表接口一次就给全字段（标题、封面、时长、UP 主），所以这里不需要第二步。
+    return getPlaylistTracksByPages(mediaId, limit, offset);
 };
 
 // 搜索结果归一化：B 站主搜索返回带 <em class="keyword"> 高亮标签的标题、'mm:ss' 时长字符串
