@@ -17,11 +17,11 @@ exports.default = async (context) => {
   await prepareBundledFfmpeg({ platform: context.electronPlatformName, arch });
   // The analysis models' runtime (electron/analysis/mnn.cjs), built from the pinned MNN source.
   const { prepareBundledMnn } = await import("./buildMnnRuntime.mjs");
-  await prepareBundledMnn({ platform: context.electronPlatformName, arch });
+  if (process.env.FOLIA_SKIP_NATIVE !== "1") await prepareBundledMnn({ platform: context.electronPlatformName, arch });
   // The two models (Beat This! final0, htdemucs), verified against shared/modelManifest.json; one
   // file each for every platform.
   const { prepareBundledModels } = await import("./fetchModels.mjs");
-  await prepareBundledModels({ outputDir: require("path").join(context.packager.projectDir, "models") });
+  if (process.env.FOLIA_SKIP_NATIVE !== "1") await prepareBundledModels({ outputDir: require("path").join(context.packager.projectDir, "models") });
   if (context.electronPlatformName === 'darwin') {
     const { prepareBundledKoffi } = await import('../packaging/macos/prepare-koffi.mjs');
     await prepareBundledKoffi({ arch, projectRoot: context.packager.projectDir });
