@@ -122,16 +122,17 @@ describe('bilibiliProvider catalog', () => {
         // 曲墙后台补全一次要 1000 条
         const page = await getPlaylistTracks('1234', 1000, 0, favFolder);
 
-        // 4 批 x 20 条：比逐页 list 少一半往返，而且总数是 ids 给的，不用靠"页面不满"去猜。
-        expect(requestedResources()).toHaveLength(4);
+        // 2 批 x 20 条：一次点开只发 3 个请求（ids + 2 批 infos），把突发压到风控阈值以下；
+        // 总数是 ids 给的，不用靠"页面不满"去猜，多出来的条目由调用方接着要。
+        expect(requestedResources()).toHaveLength(2);
         expect(requestedResources()[0].split(',')).toHaveLength(20);
-        expect(page.items).toHaveLength(80);
+        expect(page.items).toHaveLength(40);
         expect(page.total).toBe(200);
         expect(page.hasMore).toBe(true);
-        expect(page.nextOffset).toBe(80);
+        expect(page.nextOffset).toBe(40);
 
-        const next = await getPlaylistTracks('1234', 1000, 80, favFolder);
-        expect(next.items[0].id).toBe('bili-video-180');
+        const next = await getPlaylistTracks('1234', 1000, 40, favFolder);
+        expect(next.items[0].id).toBe('bili-video-140');
     });
 
     it('does not claim more entries than the folder has', async () => {

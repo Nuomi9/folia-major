@@ -128,7 +128,7 @@ const MAX_PAGES_PER_CALL = 3;
 // 走 ids + infos 两阶段时的批量上限：一次调用最多补 4 批 × 20 条。比逐页 list 少一半往返，
 // 而且总数来自 ids，不需要靠"页面返回不足一页"去猜是否到底。
 const FAV_INFO_BATCH_SIZE = 20;
-const MAX_INFO_BATCHES_PER_CALL = 4;
+const MAX_INFO_BATCHES_PER_CALL = 2;
 // ids 列表在一次浏览会话里是稳定的，缓存住可以省掉每次翻页的一个额外请求。
 const FAV_IDS_CACHE_TTL_MS = 10 * 60 * 1000;
 const favIdsCache = new Map<string, { at: number; entries: { id: string; type: number; bvid: string }[] }>();

@@ -15,7 +15,16 @@ const ENVELOPE_VERSION = 1;
 const PASSPORT_BASE = 'https://passport.bilibili.com';
 const API_BASE = 'https://api.bilibili.com';
 
-const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+// UA 要和真正发请求的 Chromium 版本对得上：写死一个旧版本（原来是 Chrome/126，而应用内是
+// Chromium 150）本身就是一条风控信号——TLS/HTTP2 指纹是 150，UA 却自称 126。运行时取
+// `process.versions.chrome`，非 Electron 环境（测试、纯 node）才退回这个常量。
+const FALLBACK_CHROME_VERSION = '126.0.0.0';
+const chromeVersion = (() => {
+    const raw = String(process.versions?.chrome || '');
+    const major = Number(raw.split('.')[0]);
+    return Number.isFinite(major) && major > 0 ? raw : FALLBACK_CHROME_VERSION;
+})();
+const USER_AGENT = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
 const COMMON_HEADERS = {
     'User-Agent': USER_AGENT,
     Referer: 'https://www.bilibili.com/',
@@ -29,9 +38,18 @@ const QR_POLL_STATE = {
     86101: 'waiting',
 };
 
-// bili_ticket 是风控票据，buvid3/4 是设备指纹：它们不带身份，但必须随每个请求送出，
-// 所以和登录凭据一起持久化。
-const SESSION_COOKIE_KEYS = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid', 'buvid3', 'buvid4', 'bili_ticket'];
+// 落盘时保留的 cookie。B站的设备身份不止 buvid3/4：`b_nut`（首次访问时间戳）、`_uuid`
+// （设备 UUID）、`b_lsid`、`buvid_fp` 一起构成「这是同一台浏览器、第几次来」的故事线。
+// 只留 buvid 而把其余的丢掉，等于每次重启都换一台新设备再拿旧登录态——B站 的设备风险分
+// 正是这么上去的。biu 的做法是整个 Chromium cookie jar 都不动，这里按同一思路放宽白名单。
+const SESSION_COOKIE_KEYS = [
+    // 登录身份
+    'SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid',
+    // 设备指纹与访问谱系
+    'buvid3', 'buvid4', 'buvid_fp', '_uuid', 'b_nut', 'b_lsid', 'buvid_fp_plain',
+    // 风控票据
+    'bili_ticket', 'bili_ticket_expires',
+];
 // 判断"已登录"只看真正带身份的 cookie。指纹 + 票据在任何匿名请求里都会被设置，
 // 把它们算进来会让未登录状态被误判成已登录。
 const AUTHENTICATION_COOKIE_KEYS = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'];
@@ -76,11 +94,16 @@ const RISK_CONTROL_HTTP_STATUSES = new Set([412, 429, 503]);
 // A blocked finger/spi endpoint must not be re-probed ahead of every business request, or the
 // bootstrap doubles our request volume precisely while Bilibili is throttling us.
 const FINGERPRINT_RETRY_BACKOFF_MS = 60 * 1000;
-// 只读请求（收藏夹、合集、view/playurl）允许少量并发，但出站节奏仍然限流：B站 限的是突发，
-// 不是并发数。单条串行链 + 300ms 间隔曾让"后台补全 1000 条"退化成 50 个排队请求（约 20 秒），
-// 而真正需要串行保序的只有登录/passport 那一类。
-const MIN_REQUEST_GAP_MS = 70;
-const READ_CONCURRENCY = 3;
+// 出站节奏按「人在浏览器里翻收藏夹」的速度来，不按「尽快把列表拉完」来。B站 的 WAF 判的是
+// 突发速率：70ms 间隔 + 3 路并发相当于每秒 14 个请求，那是爬虫的节奏；一次点开夹子连发
+// ids + 4 批 infos 就是 5 个请求挤在 300ms 内。biu 之所以几乎不触发风控，是因为它根本
+// 没有批量补全：一页 20 条，用户滚一次发一个请求。
+// 这里保留批量（否则大夹子要翻 50 页），但把节奏压回保守档：
+//   · 250ms 最小间隔 —— 每秒最多 4 个请求
+//   · 只读请求 2 路并发
+//   · 单次调用最多补 2 批 × 20 条（原来 4 批），把一次点开的突发从 5 个请求降到 3 个
+const MIN_REQUEST_GAP_MS = 250;
+const READ_CONCURRENCY = 2;
 // Operations that mint or rotate the session: they must stay strictly ordered, otherwise two
 // concurrent logins can land on the same qrcode key and the wrong one persists.
 const SERIALIZED_PATH_PREFIXES = [
