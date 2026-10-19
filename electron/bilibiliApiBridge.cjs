@@ -147,7 +147,7 @@ const parseLoginUrlCookies = (rawUrl) => {
     return found;
 };
 
-function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
+function createBilibiliApiBridge({ store, safeStorage, warn, netFetch, net, mintLoginCookies }) {
     const logWarn = (message, error) => {
         const fn = warn || console.warn;
         fn('[BilibiliBridge]', message, error instanceof Error ? error.message : error || '');
@@ -202,6 +202,28 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
         return session;
     };
 
+    /**
+     * 旧会话 / 扫码只给 SESSDATA 的会话缺 bili_jct，所有写操作都会 not logged in。
+     * 有 SESSDATA 就能在 Chromium 里补回来（B站 页面自己会去要这些凭证），补一次就够，
+     * 进程内只试一次，失败也不反复打扰平台。
+     */
+    let mintAttempted = false;
+    const ensureWriteCookies = async () => {
+        if (mintAttempted || !session) return;
+        const cookies = session.cookies || {};
+        if (!cookies.SESSDATA || cookies.bili_jct) return;
+        if (typeof mintLoginCookies !== 'function') return;
+        mintAttempted = true;
+        try {
+            const minted = await mintLoginCookies({ ...cookies });
+            if (!minted) return;
+            Object.entries(minted).forEach(([name, value]) => { if (value) setCookie(name, value); });
+            persistSession();
+        } catch (error) {
+            logWarn('failed to mint write cookies', error);
+        }
+    };
+
     const persistSession = () => {
         if (!session) return;
         if (!encryptionAvailable()) return; // degraded: memory-only
@@ -239,7 +261,70 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
         return raw.split(/,(?=\s*[A-Za-z0-9_.-]+=)/);
     };
 
-    const absorbSetCookies = (headers) => {
+    /**
+     * 扫码确认后，B站 只把 SESSDATA 放在 poll 的 Set-Cookie 里；bili_jct / DedeUserID / sid
+     * 要靠访问 poll 返回的那个 crossDomain?ticket=… 才下发——而且是在 302 的那一跳里。
+     * net.fetch 的 redirect:'manual' 返回的是不可读的 opaqueredirect（Electron 直接抛
+     * Redirect was cancelled），拿不到中间跳的响应头。所以这里走 net.request，在 'redirect'
+     * 事件里逐跳收 Set-Cookie。
+     */
+    const cookiePairsFromHeaders = (rawHeaders) => {
+        const names = [];
+        const bag = rawHeaders && typeof rawHeaders === 'object' ? rawHeaders : {};
+        const values = bag['set-cookie'] ?? bag['Set-Cookie'] ?? [];
+        (Array.isArray(values) ? values : [values]).forEach((entry) => {
+            const pair = String(entry || '').split(';')[0] || '';
+            const separator = pair.indexOf('=');
+            if (separator <= 0) return;
+            const name = pair.slice(0, separator).trim();
+            const value = pair.slice(separator + 1).trim();
+            if (!name) return;
+            if (!value) delete session?.cookies?.[name];
+            else setCookie(name, value);
+            names.push(name);
+        });
+        return names;
+    };
+
+    const absorbLoginTicket = (ticketUrl) => new Promise((resolve) => {
+        if (!ticketUrl) { resolve([]); return; }
+        const collected = [];
+        if (!net || typeof net.request !== 'function') { resolve(collected); return; }
+        let request;
+        try {
+            request = net.request({
+                method: 'GET',
+                url: String(ticketUrl),
+                redirect: 'manual',
+                credentials: 'omit',
+            });
+        } catch { resolve(collected); return; }
+        const headers = { ...COMMON_HEADERS, Referer: 'https://www.bilibili.com/' };
+        Object.entries(headers).forEach(([name, value]) => {
+            try { request.setHeader(name, value); } catch { /* 非法头就跳过 */ }
+        });
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            try { request.abort?.(); } catch { /* ignore */ }
+            resolve(collected);
+        };
+        request.on('redirect', (_status, _method, _redirectUrl, responseHeaders) => {
+            collected.push(...cookiePairsFromHeaders(responseHeaders));
+            try { request.followRedirect(); } catch { finish(); }
+        });
+        request.on('response', (response) => {
+            collected.push(...cookiePairsFromHeaders(response.headers));
+            response.on('data', () => {});
+            response.on('end', finish);
+            response.on('error', finish);
+        });
+        request.on('error', finish);
+        request.end();
+    });
+
+    const absorbSetCookies = (headers, sink) => {
         let absorbed = 0;
         const entries = collectSetCookieHeaders(headers);
         entries.forEach((entry) => {
@@ -252,6 +337,7 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             // Deletion cookies arrive as `name=; Expires=…` — treat an empty value as a removal.
             if (!value) delete session?.cookies?.[name];
             else setCookie(name, value);
+            if (sink) sink.push(name);
             absorbed += 1;
         });
         return absorbed;
@@ -591,7 +677,10 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
                 // 登录身份主要在这个 url 里，不解析就只有 SESSDATA 能读、写一律 not logged in。
                 const loginCookies = parseLoginUrlCookies(data.url);
                 Object.keys(loginCookies).forEach((name) => setCookie(name, loginCookies[name]));
+                // 新扫码流程只给 ticket：去换剩下的身份 cookie（bili_jct 就在这里）
+                await absorbLoginTicket(data.url);
                 persistSession();
+                await ensureWriteCookies();
             }
             return { state, message: data.message || '', url: data.url || '' };
         },
@@ -932,6 +1021,7 @@ function createBilibiliApiBridge({ store, safeStorage, warn, netFetch }) {
             if (!handler) throw new Error(`Unknown bilibili operation: ${operation}`);
             // Bootstrap buvid3/buvid4 before the first API call so it does not look like a bot.
             if (operation !== 'finger' && !PASSPORT_OPERATIONS.has(operation)) {
+                await ensureWriteCookies();
                 // 冷却期连引导请求都不发：指纹和票据也是出站流量，撞上去只会把封禁拖更长。
                 assertNotCoolingDown();
                 await ensureDeviceFingerprint();

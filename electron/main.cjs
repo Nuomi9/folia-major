@@ -244,10 +244,50 @@ const kugouApiBridge = createKugouApiBridge({ store, safeStorage });
 // Bilibili: the bridge owns its own cookie jar and talks through Chromium's network stack, so the
 // API traffic carries a browser-like TLS/HTTP2 fingerprint (the WAF challenges Node's undici far
 // more often). The media proxy rewrites Referer for the CDN, which refuses the renderer otherwise.
+/**
+ * B站 扫码登录只下发 SESSDATA；bili_jct / DedeUserID / sid 这些写入凭证要在真实的
+ * Chromium 会话里打开 bilibili.com 之后才被补发（B站 页面自己发起的请求带着它们）。
+ * 这里开一个隐藏窗口、把当前 cookie 灌进一个干净的分区、等 bili_jct 出现，收齐返回。
+ */
+const mintBilibiliLoginCookies = async (cookies) => {
+  if (!cookies || !cookies.SESSDATA) return null;
+  const ses = session.fromPartition(`bili-mint-${Date.now()}`);
+  try {
+    for (const [name, value] of Object.entries(cookies)) {
+      if (!value) continue;
+      try {
+        await ses.cookies.set({ url: 'https://www.bilibili.com', name, value, domain: '.bilibili.com', path: '/' });
+      } catch { /* 个别非法 cookie 跳过 */ }
+    }
+    const win = new BrowserWindow({ show: false, width: 900, height: 700, webPreferences: { session: ses } });
+    try {
+      await win.loadURL('https://www.bilibili.com/');
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        const all = await ses.cookies.get({ domain: '.bilibili.com' });
+        const map = {};
+        all.forEach(cookie => { if (cookie.name && cookie.value) map[cookie.name] = cookie.value; });
+        if (map.bili_jct && map.DedeUserID) return map;
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      return null;
+    } finally {
+      win.destroy();
+    }
+  } catch (error) {
+    console.warn('[Bilibili] mint login cookies failed:', error?.message || error);
+    return null;
+  }
+};
+
 const bilibiliApiBridge = createBilibiliApiBridge({
   store,
   safeStorage,
   netFetch: (url, init) => electronNet.fetch(url, init),
+  // 登录换票要逐跳读 Set-Cookie：net.fetch 的 manual 重定向拿不到中间那一跳的响应头。
+  net: electronNet,
+  // 扫码只给 SESSDATA：写入凭证（bili_jct）靠它在 Chromium 里补齐。
+  mintLoginCookies: mintBilibiliLoginCookies,
 });
 const bilibiliMediaProxy = createBilibiliMediaProxy({});
 const bodianMediaPolicy = createBodianMediaPolicy();

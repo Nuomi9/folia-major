@@ -380,3 +380,66 @@ describe('Bilibili API bridge login-URL cookies', () => {
         expect(bridge.getStatus().authenticated).toBe(true);
     });
 });
+
+describe('Bilibili API bridge write-cookie self-heal', () => {
+    it('mints bili_jct from an existing SESSDATA session before a business request', async () => {
+        // 回归点：扫码登录只下发 SESSDATA，缺 bili_jct 时所有写操作都会 not logged in。
+        // 有 SESSDATA 就能在 Chromium 里补齐，补完要落盘，之后 getStatus 才是 authenticated。
+        const store = createStore();
+        const safeStorage = createSafeStorage();
+        const seeded = JSON.stringify({ cookies: { SESSDATA: 'sess-token' }, refreshToken: '', wbi: null, mid: 1, nickname: 'me' });
+        store.set(SESSION_KEY, {
+            version: 1,
+            encrypted: true,
+            data: safeStorage.encryptString(seeded).toString('base64'),
+        });
+        const plan = [fingerPlan(), ticketPlan(), navPlan({ isLogin: true, mid: 42, uname: 'me' })];
+        let callIndex = 0;
+        const netFetch = vi.fn(async () => {
+            const step: any = plan[Math.min(callIndex, plan.length - 1)];
+            callIndex += 1;
+            return {
+                status: 200,
+                headers: { get: () => 'application/json', getSetCookie: () => [] },
+                json: async () => step.json,
+                body: { cancel: vi.fn(async () => {}) },
+            };
+        });
+        const mintLoginCookies = vi.fn(async () => ({ bili_jct: 'csrf-token', DedeUserID: '42', sid: 'sid-value' }));
+        const bridge = createBilibiliApiBridge({ store, safeStorage, netFetch, warn: vi.fn(), mintLoginCookies });
+
+        await bridge.request('login_status');
+
+        expect(mintLoginCookies).toHaveBeenCalledTimes(1);
+        expect(mintLoginCookies.mock.calls[0][0]).toMatchObject({ SESSDATA: 'sess-token' });
+        const envelope = readEnvelope(store, safeStorage);
+        expect(envelope.cookies.bili_jct).toBe('csrf-token');
+        expect(envelope.cookies.DedeUserID).toBe('42');
+        expect(bridge.getStatus().authenticated).toBe(true);
+    });
+
+    it('does not mint when the session already carries bili_jct', async () => {
+        const store = createStore();
+        const safeStorage = createSafeStorage();
+        const seeded = JSON.stringify({ cookies: { SESSDATA: 's', bili_jct: 'j', DedeUserID: '1' }, refreshToken: '', wbi: null, mid: 1, nickname: 'me' });
+        store.set(SESSION_KEY, { version: 1, encrypted: true, data: safeStorage.encryptString(seeded).toString('base64') });
+        const plan = [fingerPlan(), ticketPlan(), navPlan({ isLogin: true, mid: 1, uname: 'me' })];
+        let callIndex = 0;
+        const netFetch = vi.fn(async () => {
+            const step: any = plan[Math.min(callIndex, plan.length - 1)];
+            callIndex += 1;
+            return {
+                status: 200,
+                headers: { get: () => 'application/json', getSetCookie: () => [] },
+                json: async () => step.json,
+                body: { cancel: vi.fn(async () => {}) },
+            };
+        });
+        const mintLoginCookies = vi.fn(async () => ({ bili_jct: 'other' }));
+        const bridge = createBilibiliApiBridge({ store, safeStorage, netFetch, warn: vi.fn(), mintLoginCookies });
+
+        await bridge.request('login_status');
+
+        expect(mintLoginCookies).not.toHaveBeenCalled();
+    });
+});
