@@ -41,7 +41,12 @@ const OnlineSongLyricMatch: React.FC<OnlineSongLyricMatchProps> = ({ song, onClo
             }
             onMatch();
         } catch (error) {
-            console.error('Online lyric match failed', error);
+            // A source that cannot answer for this result (one whose search answer omits the id
+            // its lyric endpoint wants, say) throws rather than returning nothing. Swallowing it
+            // to the console is what made "the lyric I picked is gone next time" look like a
+            // storage bug: the save never ran and the window still closed as if it had.
+            console.error('[LyricMatch] Failed to save the chosen lyric', error);
+            setStatusMessage({ type: 'error', text: t('localMusic.noLyricsAvailable') });
         }
     };
 

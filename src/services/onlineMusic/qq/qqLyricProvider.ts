@@ -129,9 +129,17 @@ export async function searchQQSongs(keyword: string, page = 1, pageSize = 20): P
       ? getOriginalCoverUrl(`https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg?max_age=2592000`)
       : undefined;
 
+    // `songid` is the numeric id the lyric endpoint wants; `id` is only the entry's index in some
+    // responses, and taking it left every search result with id 0 - fetchQQLyrics then rejected
+    // each one as "Missing song ID or mid", so a lyric picked from the QQ tab never reached the
+    // store. qqNormalize reads the same field names for the same reason.
+    const rawSongId = info.songid ?? info.songId ?? info.id;
+    const numericSongId = Number(rawSongId);
+    const songMid = info.mid ?? info.songmid ?? info.qqMid;
+
     return {
-      id: Number(info.id || 0),
-      name: info.title || 'Unknown Song',
+      id: Number.isFinite(numericSongId) && numericSongId > 0 ? numericSongId : String(songMid ?? ''),
+      name: info.title || info.name || 'Unknown Song',
       artists,
       album: {
         id: Number(info.album?.id || 0),
@@ -139,7 +147,7 @@ export async function searchQQSongs(keyword: string, page = 1, pageSize = 20): P
         coverUrl: picUrl,
       },
       durationMs: (info.interval || 0) * 1000,
-      qqMid: info.mid,
+      qqMid: songMid,
     };
   });
 }
@@ -164,7 +172,7 @@ export async function fetchQQLyrics(
   options: { chorusRanges?: ChorusRange[] } = {}
 ): Promise<any | null> {
   if (!song.id || !song.qqMid) {
-    throw new Error('Missing song ID or mid');
+    throw new Error(`Missing song ID or mid (id=${String(song.id)}, mid=${String(song.qqMid)}, name=${String(song.name)})`);
   }
 
   const artistsStr = song.artists?.map(a => a.name).join(', ') || '';

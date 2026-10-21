@@ -29,4 +29,9 @@ export const O = {
     playerCapPlayer: option(STREAMING, 'playerCapPlayer', 'options.playerCapPlayer'),
     playerCapTimeline: option(STREAMING, 'playerCapTimeline', 'options.playerCapTimeline'),
     playerCapIgnoreClear: option(STREAMING, 'playerCapIgnoreClear', 'options.playerCapIgnoreClear'),
+    // The Bilibili source's two panels. Declared here so the anchors a command lands on are the
+    // ones the page says it carries: both are electron-only, and the rows are drawn by
+    // BilibiliFolderScopeRows / BilibiliPlaylistImportRows below the streaming group.
+    bilibiliFolders: option(STREAMING, 'bilibiliFolders', 'options.bilibiliFolders', { electronOnly: true }),
+    bilibiliImport: option(STREAMING, 'bilibiliImport', 'options.bilibiliImport', { electronOnly: true }),
 };
