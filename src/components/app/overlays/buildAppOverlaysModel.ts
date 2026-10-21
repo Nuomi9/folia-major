@@ -84,7 +84,8 @@ export type AppOverlaysDeps = {
     handleSearchOverlaySubmit: SearchOverlayProps['onSubmitSearch'];
     handleSearchLoadMore: () => Promise<void>;
     handleSearchResultPlay: (track: UnifiedSong) => void;
-    handleSearchResultAddToQueue: (track: UnifiedSong) => void;
+    /** The + on a search row: opens the playlist picker for that row. */
+    handleSearchResultAddToPlaylist: (track: UnifiedSong) => void;
     handleSearchResultArtistOpen: SearchOverlayProps['onOpenArtist'];
     handleSearchResultAlbumOpen: SearchOverlayProps['onOpenAlbum'];
     /** 搜索结果按当前本地曲库目录重算展示（见 SearchWorkspace 的同名 prop）。 */
@@ -133,7 +134,7 @@ export const buildAppOverlaysModel = ({
     handleSearchOverlaySubmit,
     handleSearchLoadMore,
     handleSearchResultPlay,
-    handleSearchResultAddToQueue,
+    handleSearchResultAddToPlaylist,
     handleSearchResultArtistOpen,
     handleSearchResultAlbumOpen,
     resolveSearchResultDisplay,
@@ -223,7 +224,7 @@ export const buildAppOverlaysModel = ({
             onSubmitSearch: handleSearchOverlaySubmit,
             onLoadMore: handleSearchLoadMore,
             onPlayTrack: handleSearchResultPlay,
-            onAddTrackToQueue: handleSearchResultAddToQueue,
+            onAddTrackToPlaylist: handleSearchResultAddToPlaylist,
             onOpenArtist: handleSearchResultArtistOpen,
             onOpenAlbum: handleSearchResultAlbumOpen,
             resolveTrackDisplay: resolveSearchResultDisplay,

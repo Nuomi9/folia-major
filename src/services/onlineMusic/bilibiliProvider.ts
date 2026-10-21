@@ -42,9 +42,16 @@ export const refreshBilibiliRiskControlState = async () => {
 
 // Bilibili APIs return http:// image URLs; http subresources are blocked in the app context, which
 // renders every cover as a black card. hdslb.com and its CDN mirrors all serve https, so upgrade.
+//
+// The search answer goes further and gives the picture as a protocol-relative `//i1.hdslb.com/...`.
+// Left as-is it resolves against the page, which is `file://` in the desktop build, so the request
+// never reaches the CDN and the row shows the placeholder. Both spellings are upgraded here, where
+// every Bilibili picture URL in this file already passes through.
 const toHttpsImageUrl = (url: unknown): string => {
     const text = String(url || '');
-    return text ? text.replace(/^http:\/\//, 'https://') : '';
+    if (!text) return '';
+    if (text.startsWith('//')) return `https:${text}`;
+    return text.replace(/^http:\/\//, 'https://');
 };
 
 type BridgeLoginStatusResult = {

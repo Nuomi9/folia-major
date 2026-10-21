@@ -148,6 +148,7 @@ import { useSettingsModalStore } from './stores/useSettingsModalStore';
 import { audioBands, audioPower, bass, currentTime, lowMid, lyricCurrentTime, mid, spectrum, treble, vocal } from './stores/motionSignals';
 import { useAppChromeStore } from './stores/useAppChromeStore';
 import { useAppViewStore } from './stores/useAppViewStore';
+import { useAddToPlaylistStore } from './stores/useAddToPlaylistStore';
 import { endLoadingToPlay, selectDisplayCoverUrl, selectDisplayDuration, selectDisplayLyrics, selectDisplayPlayerState, selectDisplaySong, selectIsShowingTail, usePlaybackStore } from './stores/usePlaybackStore';
 import { askForSong, showSong } from './components/app/playback/currentSong';
 import { useLibraryStore } from './stores/useLibraryStore';
@@ -1004,7 +1005,7 @@ export default function App() {
         handleSearchOverlaySubmit,
         handleSearchLoadMore,
         handleSearchResultPlay,
-        handleSearchResultAddToQueue,
+        handleSearchResultAddToPlaylist,
         handleUnavailableReplacementConfirm,
         handleNextTrack,
         handlePrevTrack,
@@ -2184,9 +2185,14 @@ export default function App() {
             ? applyLocalLibraryEntityDisplay(track, localLibraryCatalog, playerDisplayCatalogIndex)
             : track
     ), [localLibraryCatalog, playerDisplayCatalogIndex]);
+    // The picker can be about a song other than the one playing (the + on a search row), and which
+    // folders a song may go into is a question about THAT song's provider. The subject wins while
+    // a picker is up; otherwise this stays what the star button means.
+    const addToPlaylistSubject = useAddToPlaylistStore(state => state.subject);
     const onlinePlaylists = useMemo(() => {
-        return playerDisplayCurrentSong ? omni.getPlaylistsForSong(playerDisplayCurrentSong) : [];
-    }, [onlineProviders, playerDisplayCurrentSong]);
+        const song = addToPlaylistSubject ?? playerDisplayCurrentSong;
+        return song ? omni.getPlaylistsForSong(song) : [];
+    }, [onlineProviders, playerDisplayCurrentSong, addToPlaylistSubject]);
 
     const playerPanelModel = usePlayerPanelModel({
         navigateToHome,
@@ -2252,7 +2258,7 @@ export default function App() {
         handleSearchOverlaySubmit,
         handleSearchLoadMore,
         handleSearchResultPlay,
-        handleSearchResultAddToQueue,
+        handleSearchResultAddToPlaylist,
         handleSearchResultArtistOpen,
         handleSearchResultAlbumOpen,
         resolveSearchResultDisplay,

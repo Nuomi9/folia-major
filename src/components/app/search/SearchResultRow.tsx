@@ -16,7 +16,8 @@ type SearchResultRowProps = {
     style: React.CSSProperties;
     isDaylight: boolean;
     onPlayTrack: (track: UnifiedSong) => void;
-    onAddTrackToQueue: (track: UnifiedSong) => void;
+    /** The + : opens the playlist picker for this row. */
+    onAddTrackToPlaylist: (track: UnifiedSong) => void;
     onOpenArtist: (track: UnifiedSong, artistName: string, artistId?: MediaId, entityId?: string) => void;
     onOpenAlbum: (track: UnifiedSong, albumName: string, albumId?: MediaId, entityId?: string) => void;
 };
@@ -33,7 +34,7 @@ const SearchResultRow: React.FC<SearchResultRowProps> = ({
     style,
     isDaylight,
     onPlayTrack,
-    onAddTrackToQueue,
+    onAddTrackToPlaylist,
     onOpenArtist,
     onOpenAlbum,
 }) => {
@@ -142,9 +143,9 @@ const SearchResultRow: React.FC<SearchResultRowProps> = ({
                 {!isUnavailable && (
                     <button
                         type="button"
-                        onClick={() => onAddTrackToQueue(track)}
+                        onClick={() => onAddTrackToPlaylist(track)}
                         className="shrink-0 rounded-full p-2 opacity-60 transition-all hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10 sm:opacity-0 sm:group-hover:opacity-100"
-                        title={t('navidrome.addToQueue')}
+                        title={t('localMusic.addToPlaylist')}
                     >
                         <Plus size={16} />
                     </button>

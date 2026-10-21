@@ -44,7 +44,6 @@ import { moveQueueItem } from '../../../../utils/queueReorder';
 import { buildStagePlayerSnapshot, resolveStagePlayerQueueItemIndex } from '../../../../utils/stagePlayerSnapshot';
 import type { LocalLibraryDisplayCatalog } from '../../../../services/playbackAdapters';
 import type { SearchReturnView, SearchSource } from '../../../../stores/useSearchNavigationStore';
-import { dispatchSearchTrackAction } from '../../search/searchTrackActions';
 import { playbackFade } from '../../../../services/playbackFade';
 import { getProviderSongMetadata } from '../../../../services/onlineMusic/songMetadata';
 import { setStatusMessage as setStatusMsg } from '../../../../stores/useStatusMessageStore';
@@ -56,6 +55,7 @@ import { offersRetry, onlineFailureOf, stopsPlayback, type OnlineFailure } from 
 import { openLoginWindow } from '../../../login/loginWindowStore';
 import { useTranslation } from 'react-i18next';
 import { currentTime } from '../../../../stores/motionSignals';
+import { openAddToPlaylistForSong } from '../../../../stores/useAddToPlaylistStore';
 import { setIsPanelOpen, setPanelTab } from '../../../../stores/useAppViewStore';
 import { useAudioSettingsStore } from '../../../../stores/useAudioSettingsStore';
 import { useSearchNavigationStore } from '../../../../stores/useSearchNavigationStore';
@@ -1024,19 +1024,14 @@ export function usePlaybackQueueController({
         }
     }, [buildQueueWithReplacementSong, pendingUnavailableReplacement, playSong, setStatusMsg, t]);
 
-    const handleSearchResultAddToQueue = useCallback((track: UnifiedSong) => {
-        dispatchSearchTrackAction(track, {
-            localSongs,
-            onLocal: onAddLocalSongToQueue,
-            onNavidrome: navidromeSong => onAddNavidromeSongsToQueue([navidromeSong]),
-            onOnline: addOnlineSongToQueue,
-        });
-    }, [
-        addOnlineSongToQueue,
-        localSongs,
-        onAddLocalSongToQueue,
-        onAddNavidromeSongsToQueue,
-    ]);
+    // The + on a search row opens the playlist picker for that row rather than queueing it: a
+    // search is where a song is found, and what a listener wants next is to keep it - into a local
+    // playlist, or into an owned folder of the source it came from (Bilibili's fav_deal). The
+    // picker itself already knows how to ask each of the three kinds, and it is the same one the
+    // star button opens, so there is one place that decides where a song can go.
+    const handleSearchResultAddToPlaylist = useCallback((track: UnifiedSong) => {
+        openAddToPlaylistForSong(track);
+    }, []);
 
     const handleNextTrack = useCallback(async (options?: NextTrackOptions) => {
         if (isNowPlayingStageActive) return;
@@ -1545,7 +1540,7 @@ export function usePlaybackQueueController({
         handleSearchOverlaySubmit,
         handleSearchLoadMore,
         handleSearchResultPlay,
-        handleSearchResultAddToQueue,
+        handleSearchResultAddToPlaylist,
         handleUnavailableReplacementConfirm,
         handleNextTrack,
         handlePrevTrack,

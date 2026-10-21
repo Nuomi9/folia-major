@@ -23,7 +23,7 @@ type SearchWorkspaceProps = {
     onSubmitSearch: (source?: SearchSource) => void;
     onLoadMore: () => void;
     onPlayTrack: (track: UnifiedSong) => void;
-    onAddTrackToQueue: (track: UnifiedSong) => void;
+    onAddTrackToPlaylist: (track: UnifiedSong) => void;
     onOpenArtist: (track: UnifiedSong, artistName: string, artistId?: MediaId, entityId?: string) => void;
     onOpenAlbum: (track: UnifiedSong, albumName: string, albumId?: MediaId, entityId?: string) => void;
     /**
@@ -41,7 +41,7 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
     onSubmitSearch,
     onLoadMore,
     onPlayTrack,
-    onAddTrackToQueue,
+    onAddTrackToPlaylist,
     onOpenArtist,
     onOpenAlbum,
     resolveTrackDisplay,
@@ -207,7 +207,7 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
                                         isDaylight={isDaylight}
                                         onScrollTopChange={setSearchScrollTop}
                                         onPlayTrack={onPlayTrack}
-                                        onAddTrackToQueue={onAddTrackToQueue}
+                                        onAddTrackToPlaylist={onAddTrackToPlaylist}
                                         onOpenArtist={onOpenArtist}
                                         onOpenAlbum={onOpenAlbum}
                                     />

@@ -1,13 +1,18 @@
 import { create } from 'zustand';
+import type { SongResult } from '../types';
 
 // src/stores/useAddToPlaylistStore.ts
-// The "add the current song to a playlist" dialog: whether it is up, and whether it could do
-// anything if it were.
+// The "add a song to a playlist" dialog: whether it is up, which song it is about, and whether it
+// could do anything if it were.
 //
 // The dialog used to be a local useState inside UnifiedPanel, next to the star button that opened
-// it, which meant it only existed while the player panel was mounted. It is a decision about the
-// current song, not about the panel, so a command should be able to reach it from anywhere — and
-// that requires the open state to outlive the panel.
+// it, which meant it only existed while the player panel was mounted. It is a decision about a
+// song, not about the panel, so a command should be able to reach it from anywhere — and that
+// requires the open state to outlive the panel.
+//
+// `subject` is the song the picker is about when it was opened from somewhere that is not the
+// player: the + on a search result asks about that row, which is usually not what is playing.
+// Absent means "the song on screen", which is what the star button and the command mean.
 //
 // `availability` is published by the host rather than derived per caller: answering it needs the
 // Navidrome playlist list, which is fetched, and two consumers each fetching it would be worse
@@ -26,18 +31,24 @@ const UNAVAILABLE: AddToPlaylistAvailability = { isApplicable: false, canAdd: fa
 
 type AddToPlaylistState = {
     isOpen: boolean;
+    subject: SongResult | null;
     availability: AddToPlaylistAvailability;
-    open: () => void;
+    open: (subject?: SongResult | null) => void;
     close: () => void;
     setAvailability: (availability: AddToPlaylistAvailability) => void;
 };
 
 export const useAddToPlaylistStore = create<AddToPlaylistState>((set) => ({
     isOpen: false,
+    subject: null,
     availability: UNAVAILABLE,
-    open: () => set({ isOpen: true }),
-    close: () => set({ isOpen: false }),
+    open: (subject) => set({ isOpen: true, subject: subject ?? null }),
+    close: () => set({ isOpen: false, subject: null }),
     setAvailability: (availability) => set({ availability }),
 }));
 
+/** Opens the picker for the song on screen. */
 export const openAddToPlaylist = () => useAddToPlaylistStore.getState().open();
+
+/** Opens the picker for one particular song, whether or not it is the one playing. */
+export const openAddToPlaylistForSong = (song: SongResult) => useAddToPlaylistStore.getState().open(song);

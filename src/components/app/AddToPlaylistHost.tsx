@@ -70,17 +70,19 @@ export const AddToPlaylistHost: React.FC<AddToPlaylistHostProps> = ({
     // The song as the listener sees it, so a blend shows the track that is on screen. It is what
     // the star button answers for.
     const shownSong = usePlaybackStore(selectDisplaySong);
-    const { isOpen, close, setAvailability } = useAddToPlaylistStore(useShallow(state => ({
+    const { isOpen, subject, close, setAvailability } = useAddToPlaylistStore(useShallow(state => ({
         isOpen: state.isOpen,
+        subject: state.subject,
         close: state.close,
         setAvailability: state.setAvailability,
     })));
     // The song the picker is about: the one that was shown when it came up. The track can change
     // under an open picker (a blend lands, the queue advances), and the picker does not say which
-    // song it is for; what it adds is the song the listener asked about.
+    // song it is for; what it adds is the song the listener asked about. A picker opened from a
+    // search row asks about that row instead of whatever is playing.
     const [askedSong, setAskedSong] = useState<SongResult | null>(null);
-    if (isOpen && !askedSong && shownSong) {
-        setAskedSong(shownSong);
+    if (isOpen && !askedSong && (subject ?? shownSong)) {
+        setAskedSong(subject ?? shownSong);
     } else if (!isOpen && askedSong) {
         setAskedSong(null);
     }
@@ -90,7 +92,11 @@ export const AddToPlaylistHost: React.FC<AddToPlaylistHostProps> = ({
 
     // The dialogs are about the song they were asked for, whatever is playing by now.
     const currentSong = createFor ?? (isOpen ? askedSong : null) ?? shownSong;
-    const shown = describeSong(shownSong, onlinePlaylists.length > 0);
+    // What the picker is about while it is up: the song it was opened for, which is a search row
+    // when the + there asked. `shownSong` answers the star button and the command, and publishing
+    // availability for it while a row's picker is up would grey out the picker the row opened.
+    const subjectSong = isOpen ? (askedSong ?? shownSong) : shownSong;
+    const shown = describeSong(subjectSong, onlinePlaylists.length > 0);
     const { isNavidrome, isLocal, isOnline, canCreateOnline, isApplicable, canAdd } = describeSong(currentSong, onlinePlaylists.length > 0);
     const needsNavidromePlaylists = isNavidrome || shown.isNavidrome;
 

@@ -12,7 +12,7 @@ type SearchResultsListProps = {
     isDaylight: boolean;
     onScrollTopChange: (scrollTop: number) => void;
     onPlayTrack: (track: UnifiedSong) => void;
-    onAddTrackToQueue: (track: UnifiedSong) => void;
+    onAddTrackToPlaylist: (track: UnifiedSong) => void;
     onOpenArtist: (track: UnifiedSong, artistName: string, artistId?: MediaId, entityId?: string) => void;
     onOpenAlbum: (track: UnifiedSong, albumName: string, albumId?: MediaId, entityId?: string) => void;
 };
